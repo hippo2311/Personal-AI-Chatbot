@@ -114,7 +114,9 @@
 .date-input,
 input[type='text'],
 input[type='time'],
-input[type='date'] {
+input[type='date'],
+select,
+textarea {
   border: 1px solid #c4ced4;
   border-radius: 10px;
   padding: 0.6rem 0.7rem;
@@ -122,6 +124,11 @@ input[type='date'] {
   font-family: inherit;
   background: #ffffff;
   color: #1b2b34;
+}
+
+textarea {
+  min-height: 110px;
+  resize: vertical;
 }
 
 .chat-meta {
@@ -259,6 +266,110 @@ button {
   font-size: 1.2rem;
 }
 
+.diary-kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(120px, 1fr));
+  gap: 0.65rem;
+}
+
+.diary-split {
+  grid-template-columns: 1.2fr 1fr;
+}
+
+.diary-form-grid,
+.diary-search-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(140px, 1fr));
+  gap: 0.7rem;
+}
+
+.diary-form-grid label,
+.diary-search-grid label,
+.diary-field {
+  display: grid;
+  gap: 0.35rem;
+  color: #3c4d59;
+  font-weight: 600;
+}
+
+.diary-field {
+  margin-top: 0.75rem;
+}
+
+.diary-field textarea {
+  font-weight: 400;
+}
+
+.ghost-btn {
+  background: #f3fbff;
+  color: #1c5b6c;
+}
+
+.diary-list {
+  margin-top: 0.75rem;
+  display: grid;
+  gap: 0.65rem;
+}
+
+.diary-item {
+  border: 1px solid #d9e5eb;
+  border-radius: 12px;
+  background: #f9fdfd;
+  padding: 0.75rem;
+}
+
+.diary-item-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.55rem;
+}
+
+.diary-item-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.55rem;
+}
+
+.diary-type-chip {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  border: 1px solid #d6e0e8;
+  padding: 0.2rem 0.5rem;
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.diary-good {
+  background: #e8f8dc;
+  color: #2f6044;
+}
+
+.diary-bad {
+  background: #ffd8d1;
+  color: #7a3a37;
+}
+
+.diary-item h4 {
+  margin: 0.55rem 0 0.35rem;
+  color: #22333d;
+}
+
+.diary-item p {
+  margin: 0;
+  color: #30424d;
+  white-space: pre-wrap;
+}
+
+.delete-btn {
+  background: #ffeceb;
+  color: #873b37;
+  border-color: #f6c7c3;
+}
+
 .split-grid {
   display: grid;
   grid-template-columns: 1.5fr 1fr;
@@ -391,6 +502,10 @@ button {
     grid-template-columns: repeat(2, minmax(120px, 1fr));
   }
 
+  .diary-kpi-grid {
+    grid-template-columns: repeat(2, minmax(120px, 1fr));
+  }
+
   .split-grid {
     grid-template-columns: 1fr;
   }
@@ -420,5 +535,11 @@ button {
   .panel-header {
     flex-direction: column;
     align-items: flex-start;
+  }
+
+  .diary-kpi-grid,
+  .diary-form-grid,
+  .diary-search-grid {
+    grid-template-columns: 1fr;
   }
 }

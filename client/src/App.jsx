@@ -35,6 +35,17 @@ const QUICK_REPLIES = [
   'I feel stressed and tired today.',
   'I had an awesome day!',
 ];
+const MAX_PHOTOS_PER_ENTRY = 6;
+const MAX_PHOTO_SIZE_BYTES = 4 * 1024 * 1024;
+
+function fileToDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ''));
+    reader.onerror = () => reject(new Error('Failed to read image file.'));
+    reader.readAsDataURL(file);
+  });
+}
 
 function normalizeDiaryEntries(rawEntries) {
   const source = Array.isArray(rawEntries) ? rawEntries : [];
@@ -43,7 +54,24 @@ function normalizeDiaryEntries(rawEntries) {
       .map((entry) => {
         const title = String(entry?.title || '').trim();
         const details = String(entry?.details || '').trim();
-        if (!title && !details) {
+        const photos = Array.isArray(entry?.photos)
+          ? entry.photos
+              .map((photo, index) => {
+                const dataUrl =
+                  typeof photo === 'string' ? photo : String(photo?.dataUrl || '');
+                if (!dataUrl.startsWith('data:image')) {
+                  return null;
+                }
+                return {
+                  id: String(photo?.id || `${entry?.id || 'entry'}-photo-${index}`),
+                  name: String(photo?.name || `Photo ${index + 1}`),
+                  dataUrl,
+                };
+              })
+              .filter(Boolean)
+          : [];
+
+        if (!title && !details && photos.length === 0) {
           return null;
         }
 
@@ -53,6 +81,7 @@ function normalizeDiaryEntries(rawEntries) {
           type: entry?.type === 'bad' ? 'bad' : 'good',
           title: title || details.slice(0, 80),
           details,
+          photos,
           createdAt: String(entry?.createdAt || `${toIsoDate()}T12:00:00.000Z`),
         };
       })
@@ -69,6 +98,8 @@ function App() {
   const [diaryType, setDiaryType] = useState('good');
   const [diaryTitle, setDiaryTitle] = useState('');
   const [diaryDetails, setDiaryDetails] = useState('');
+  const [diaryPhotos, setDiaryPhotos] = useState([]);
+  const [diaryPhotoError, setDiaryPhotoError] = useState('');
   const [diaryQuery, setDiaryQuery] = useState('');
   const [diaryFilterType, setDiaryFilterType] = useState('all');
   const [diaryFilterDate, setDiaryFilterDate] = useState('');
@@ -92,9 +123,10 @@ function App() {
       } else {
         stats.goodCount += 1;
       }
+      stats.photoCount += Array.isArray(entry.photos) ? entry.photos.length : 0;
       return stats;
     },
-    { total: 0, goodCount: 0, badCount: 0 }
+    { total: 0, goodCount: 0, badCount: 0, photoCount: 0 }
   );
 
   const query = diaryQuery.trim().toLowerCase();
@@ -252,10 +284,60 @@ function App() {
     });
   };
 
+  const handleDiaryPhotoSelect = async (event) => {
+    const files = Array.from(event.target.files || []);
+    event.target.value = '';
+    setDiaryPhotoError('');
+
+    if (!files.length) {
+      return;
+    }
+
+    const allowedSlots = Math.max(0, MAX_PHOTOS_PER_ENTRY - diaryPhotos.length);
+    if (allowedSlots === 0) {
+      setDiaryPhotoError(`You can upload up to ${MAX_PHOTOS_PER_ENTRY} photos per entry.`);
+      return;
+    }
+
+    const nextFiles = files.slice(0, allowedSlots);
+    const convertedPhotos = [];
+
+    for (const file of nextFiles) {
+      if (!String(file.type || '').startsWith('image/')) {
+        setDiaryPhotoError('Only image files are supported.');
+        continue;
+      }
+
+      if (file.size > MAX_PHOTO_SIZE_BYTES) {
+        setDiaryPhotoError('Each photo must be 4MB or smaller.');
+        continue;
+      }
+
+      try {
+        const dataUrl = await fileToDataUrl(file);
+        convertedPhotos.push({
+          id: randomId(),
+          name: file.name || 'Photo',
+          dataUrl,
+        });
+      } catch {
+        setDiaryPhotoError('Could not read one of the selected photos.');
+      }
+    }
+
+    if (convertedPhotos.length) {
+      setDiaryPhotos((previous) => [...previous, ...convertedPhotos].slice(0, MAX_PHOTOS_PER_ENTRY));
+    }
+  };
+
+  const removeSelectedDiaryPhoto = (photoId) => {
+    setDiaryPhotos((previous) => previous.filter((photo) => photo.id !== photoId));
+  };
+
   const addDiaryEntry = () => {
     const title = diaryTitle.trim();
     const details = diaryDetails.trim();
-    if (!title && !details) {
+    if (!title && !details && diaryPhotos.length === 0) {
       return;
     }
 
@@ -265,6 +347,11 @@ function App() {
       type: diaryType === 'bad' ? 'bad' : 'good',
       title: title || details.slice(0, 80),
       details,
+      photos: diaryPhotos.map((photo) => ({
+        id: photo.id,
+        name: photo.name,
+        dataUrl: photo.dataUrl,
+      })),
       createdAt: new Date().toISOString(),
     };
 
@@ -278,6 +365,8 @@ function App() {
 
     setDiaryTitle('');
     setDiaryDetails('');
+    setDiaryPhotos([]);
+    setDiaryPhotoError('');
   };
 
   const clearDiaryFilters = () => {
@@ -326,6 +415,8 @@ function App() {
     setDiaryType('good');
     setDiaryTitle('');
     setDiaryDetails('');
+    setDiaryPhotos([]);
+    setDiaryPhotoError('');
     clearDiaryFilters();
   };
 
@@ -376,6 +467,10 @@ function App() {
             setDiaryTitle={setDiaryTitle}
             diaryDetails={diaryDetails}
             setDiaryDetails={setDiaryDetails}
+            diaryPhotos={diaryPhotos}
+            diaryPhotoError={diaryPhotoError}
+            handleDiaryPhotoSelect={handleDiaryPhotoSelect}
+            removeSelectedDiaryPhoto={removeSelectedDiaryPhoto}
             addDiaryEntry={addDiaryEntry}
             diaryQuery={diaryQuery}
             setDiaryQuery={setDiaryQuery}

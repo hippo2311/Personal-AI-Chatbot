@@ -6,6 +6,11 @@ const REACTION_LABELS = {
   care: 'Care',
 };
 
+function getInitial(name) {
+  const text = String(name || '').trim();
+  return text ? text.charAt(0).toUpperCase() : 'U';
+}
+
 function CommunityWallPage({
   activeUser,
   wallDraft,
@@ -52,119 +57,130 @@ function CommunityWallPage({
         </div>
       </div>
 
-      <div className="card wall-create-card">
-        <h3>Share A Good Thing</h3>
-        <label className="wall-field">
-          Good thing
-          <textarea
-            value={wallDraft}
-            onChange={(event) => setWallDraft(event.target.value)}
-            placeholder="What positive thing happened today?"
-          />
-        </label>
+      <div className="wall-layout">
+        <div className="wall-compose-column">
+          <div className="card wall-create-card">
+            <h3>Share A Good Thing</h3>
+            <label className="wall-field">
+              Good thing
+              <textarea
+                value={wallDraft}
+                onChange={(event) => setWallDraft(event.target.value)}
+                placeholder="What positive thing happened today?"
+              />
+            </label>
 
-        <label className="wall-field">
-          Upload photos
-          <input type="file" accept="image/*" multiple onChange={handleWallPhotoSelect} />
-        </label>
+            <label className="wall-field">
+              Upload photos
+              <input type="file" accept="image/*" multiple onChange={handleWallPhotoSelect} />
+            </label>
 
-        {wallPhotoError && <p className="error-text">{wallPhotoError}</p>}
+            {wallPhotoError && <p className="error-text">{wallPhotoError}</p>}
 
-        {wallPhotos.length > 0 && (
-          <div className="selected-photo-list wall-selected-photos">
-            {wallPhotos.map((photo) => (
-              <article key={photo.id} className="selected-photo-item">
-                <img src={photo.dataUrl} alt={photo.name} />
-                <button className="delete-btn" onClick={() => removeSelectedWallPhoto(photo.id)}>
-                  Remove
-                </button>
-              </article>
-            ))}
-          </div>
-        )}
-
-        <label className="wall-anon-toggle">
-          <input
-            type="checkbox"
-            checked={wallAnonymous}
-            onChange={(event) => setWallAnonymous(event.target.checked)}
-          />
-          Post anonymously
-        </label>
-
-        <button onClick={createWallPost}>Share To Wall</button>
-      </div>
-
-      <div className="wall-list">
-        {wallPosts.length === 0 && (
-          <div className="card">
-            <p className="muted">No shared posts yet. Be the first one to post a good thing.</p>
-          </div>
-        )}
-
-        {wallPosts.map((post) => (
-          <article key={post.id} className="card wall-post">
-            <header className="wall-post-header">
-              <strong>{post.anonymous ? 'Anonymous' : post.authorName}</strong>
-              <span className="mono">{formatTime(post.createdAt)}</span>
-            </header>
-
-            {post.text && <p className="wall-post-text">{post.text}</p>}
-
-            {Array.isArray(post.photos) && post.photos.length > 0 && (
-              <div className={`wall-media-grid wall-media-${Math.min(post.photos.length, 4)}`}>
-                {post.photos.map((photo) => (
-                  <button
-                    key={photo.id}
-                    className="photo-thumb-btn wall-photo-btn"
-                    onClick={() => openPhotoViewer(photo, post)}
-                  >
-                    <img src={photo.dataUrl} alt={photo.name || post.text || 'Wall photo'} />
-                  </button>
+            {wallPhotos.length > 0 && (
+              <div className="selected-photo-list wall-selected-photos">
+                {wallPhotos.map((photo) => (
+                  <article key={photo.id} className="selected-photo-item">
+                    <img src={photo.dataUrl} alt={photo.name} />
+                    <button className="delete-btn" onClick={() => removeSelectedWallPhoto(photo.id)}>
+                      Remove
+                    </button>
+                  </article>
                 ))}
               </div>
             )}
 
-            <div className="wall-reactions">
-              {Object.entries(REACTION_LABELS).map(([reactionKey, label]) => {
-                const users = post.reactions[reactionKey] || [];
-                const isActive = users.includes(activeUser.id);
-                return (
-                  <button
-                    key={reactionKey}
-                    className={`reaction-btn ${isActive ? 'active' : ''}`}
-                    onClick={() => toggleWallReaction(post.id, reactionKey)}
-                  >
-                    {label} ({users.length})
-                  </button>
-                );
-              })}
-            </div>
-
-            <div className="wall-comment-compose">
+            <label className="wall-anon-toggle">
               <input
-                type="text"
-                value={wallCommentDrafts[post.id] || ''}
-                onChange={(event) => setWallCommentDraft(post.id, event.target.value)}
-                placeholder="Leave a supportive comment..."
+                type="checkbox"
+                checked={wallAnonymous}
+                onChange={(event) => setWallAnonymous(event.target.checked)}
               />
-              <button onClick={() => addWallComment(post.id)}>Comment</button>
-            </div>
+              Post anonymously
+            </label>
 
-            <div className="wall-comments">
-              {post.comments.length === 0 && <p className="muted">No comments yet.</p>}
-              {post.comments.map((comment) => (
-                <div key={comment.id} className="wall-comment-item">
-                  <header>
-                    <strong>{comment.authorName}</strong>
-                    <span className="mono">{formatTime(comment.createdAt)}</span>
-                  </header>
-                  <p>{comment.text}</p>
+            <button onClick={createWallPost}>Share To Wall</button>
+          </div>
+        </div>
+
+        <div className="wall-feed-column">
+          <div className="wall-list">
+            {wallPosts.length === 0 && (
+              <div className="card">
+                <p className="muted">No shared posts yet. Be the first one to post a good thing.</p>
+              </div>
+            )}
+
+            {wallPosts.map((post) => (
+              <article key={post.id} className="card wall-post">
+                <header className="wall-post-header">
+                  <div className="wall-author">
+                    <div className="wall-avatar">
+                      {getInitial(post.anonymous ? 'Anonymous' : post.authorName)}
+                    </div>
+                    <strong>{post.anonymous ? 'Anonymous' : post.authorName}</strong>
+                  </div>
+                  <span className="mono">{formatTime(post.createdAt)}</span>
+                </header>
+
+                {post.text && <p className="wall-post-text">{post.text}</p>}
+
+                {Array.isArray(post.photos) && post.photos.length > 0 && (
+                  <div className={`wall-media-grid wall-media-${Math.min(post.photos.length, 4)}`}>
+                    {post.photos.map((photo) => (
+                      <button
+                        key={photo.id}
+                        className="photo-thumb-btn wall-photo-btn"
+                        onClick={() => openPhotoViewer(photo, post)}
+                      >
+                        <img src={photo.dataUrl} alt={photo.name || post.text || 'Wall photo'} />
+                      </button>
+                    ))}
+                  </div>
+                )}
+
+                <div className="wall-reactions">
+                  {Object.entries(REACTION_LABELS).map(([reactionKey, label]) => {
+                    const users = post.reactions[reactionKey] || [];
+                    const isActive = users.includes(activeUser.id);
+                    return (
+                      <button
+                        key={reactionKey}
+                        className={`reaction-btn ${isActive ? 'active' : ''}`}
+                        onClick={() => toggleWallReaction(post.id, reactionKey)}
+                      >
+                        {label} ({users.length})
+                      </button>
+                    );
+                  })}
                 </div>
-              ))}
-            </div>
-          </article>
-        ))}
+
+                <div className="wall-comment-compose">
+                  <input
+                    type="text"
+                    value={wallCommentDrafts[post.id] || ''}
+                    onChange={(event) => setWallCommentDraft(post.id, event.target.value)}
+                    placeholder="Leave a supportive comment..."
+                  />
+                  <button onClick={() => addWallComment(post.id)}>Comment</button>
+                </div>
+
+                <div className="wall-comments">
+                  {post.comments.length === 0 && <p className="muted">No comments yet.</p>}
+                  {post.comments.map((comment) => (
+                    <div key={comment.id} className="wall-comment-item">
+                      <header>
+                        <strong>{comment.authorName}</strong>
+                        <span className="mono">{formatTime(comment.createdAt)}</span>
+                      </header>
+                      <p>{comment.text}</p>
+                    </div>
+                  ))}
+                </div>
+              </article>
+            ))}
+          </div>
+        </div>
       </div>
 
       {selectedPhoto && (

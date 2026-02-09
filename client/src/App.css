@@ -80,6 +80,7 @@
 
 .main-panel {
   display: grid;
+  align-content: start;
 }
 
 .panel {
@@ -124,6 +125,7 @@ textarea {
   font-family: inherit;
   background: #ffffff;
   color: #1b2b34;
+  width: 100%;
 }
 
 textarea {
@@ -221,6 +223,16 @@ button {
   padding: 0.55rem 0.85rem;
   font-weight: 600;
   cursor: pointer;
+  transition: transform 0.12s ease, box-shadow 0.12s ease, filter 0.12s ease;
+}
+
+button:hover {
+  filter: brightness(0.98);
+  box-shadow: 0 6px 14px rgba(7, 52, 64, 0.12);
+}
+
+button:active {
+  transform: translateY(1px);
 }
 
 .quick-actions button {
@@ -416,7 +428,23 @@ button {
 }
 
 .wall-create-card {
-  max-width: 760px;
+  max-width: 100%;
+}
+
+.wall-layout {
+  display: grid;
+  grid-template-columns: minmax(260px, 360px) minmax(0, 1fr);
+  gap: 0.8rem;
+}
+
+.wall-compose-column {
+  position: sticky;
+  top: 1rem;
+  align-self: start;
+}
+
+.wall-feed-column {
+  min-width: 0;
 }
 
 .wall-field {
@@ -442,6 +470,7 @@ button {
 
 .wall-post {
   gap: 0.7rem;
+  padding: 0.95rem;
 }
 
 .wall-post-header {
@@ -449,6 +478,24 @@ button {
   justify-content: space-between;
   align-items: center;
   gap: 0.6rem;
+}
+
+.wall-author {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.wall-avatar {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  font-weight: 700;
+  color: #1d4e63;
+  background: linear-gradient(155deg, #d8f2ff, #ecf9ff);
+  border: 1px solid #beddea;
 }
 
 .wall-post-text {
@@ -512,6 +559,7 @@ button {
 .reaction-btn {
   background: #f3fbff;
   color: #1c5b6c;
+  min-width: 106px;
 }
 
 .reaction-btn.active {
@@ -851,6 +899,14 @@ button {
 
   .db-row {
     grid-template-columns: 1fr 1fr;
+  }
+
+  .wall-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .wall-compose-column {
+    position: static;
   }
 }
 

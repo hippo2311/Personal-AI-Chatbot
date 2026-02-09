@@ -1,4 +1,4 @@
-const TABS = ['chat', 'diary', 'dashboard', 'settings'];
+const TABS = ['chat', 'diary', 'community', 'dashboard', 'settings'];
 
 function Sidebar({ activeUser, reminderText, tab, setTab }) {
   return (

@@ -415,6 +415,145 @@ button {
   border-color: #f6c7c3;
 }
 
+.wall-create-card {
+  max-width: 760px;
+}
+
+.wall-field {
+  display: grid;
+  gap: 0.35rem;
+  color: #3c4d59;
+  font-weight: 600;
+}
+
+.wall-anon-toggle {
+  margin: 0.65rem 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  color: #3f5260;
+  font-weight: 600;
+}
+
+.wall-list {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.wall-post {
+  gap: 0.7rem;
+}
+
+.wall-post-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.wall-post-text {
+  margin: 0;
+  color: #24353f;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+
+.wall-selected-photos {
+  margin-bottom: 0.25rem;
+}
+
+.wall-media-grid {
+  display: grid;
+  gap: 0.35rem;
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+.wall-media-1 {
+  grid-template-columns: 1fr;
+}
+
+.wall-media-2 {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.wall-media-3 {
+  grid-template-columns: 1.2fr 1fr;
+  grid-template-rows: repeat(2, minmax(100px, 1fr));
+}
+
+.wall-media-3 .wall-photo-btn:first-child {
+  grid-row: 1 / span 2;
+}
+
+.wall-media-4 {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.wall-photo-btn {
+  display: block;
+}
+
+.wall-photo-btn img {
+  width: 100%;
+  height: 220px;
+  object-fit: cover;
+  border-radius: 0;
+  border: none;
+  display: block;
+}
+
+.wall-reactions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+}
+
+.reaction-btn {
+  background: #f3fbff;
+  color: #1c5b6c;
+}
+
+.reaction-btn.active {
+  background: #dff3ff;
+  border-color: #a8c9df;
+}
+
+.wall-comment-compose {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 0.5rem;
+}
+
+.wall-comment-compose input {
+  width: 100%;
+}
+
+.wall-comments {
+  display: grid;
+  gap: 0.45rem;
+}
+
+.wall-comment-item {
+  border: 1px solid #d9e6ec;
+  border-radius: 10px;
+  background: #f9fcfe;
+  padding: 0.55rem;
+}
+
+.wall-comment-item header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.35rem;
+}
+
+.wall-comment-item p {
+  margin: 0;
+  color: #324550;
+}
+
 .calendar-header {
   display: flex;
   justify-content: space-between;
@@ -721,6 +860,10 @@ button {
   }
 
   .composer {
+    grid-template-columns: 1fr;
+  }
+
+  .wall-comment-compose {
     grid-template-columns: 1fr;
   }
 

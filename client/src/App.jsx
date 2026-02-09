@@ -3,6 +3,7 @@ import './App.css';
 import Sidebar from './components/Sidebar.jsx';
 import ChatPage from './pages/ChatPage.jsx';
 import DiaryPage from './pages/DiaryPage.jsx';
+import CommunityWallPage from './pages/CommunityWallPage.jsx';
 import DashboardPage from './pages/DashboardPage.jsx';
 import SettingsPage from './pages/SettingsPage.jsx';
 import {
@@ -37,6 +38,7 @@ const QUICK_REPLIES = [
 ];
 const MAX_PHOTOS_PER_ENTRY = 6;
 const MAX_PHOTO_SIZE_BYTES = 4 * 1024 * 1024;
+const MAX_WALL_PHOTOS_PER_POST = 4;
 
 function fileToDataUrl(file) {
   return new Promise((resolve, reject) => {
@@ -89,6 +91,70 @@ function normalizeDiaryEntries(rawEntries) {
   );
 }
 
+function normalizeWallPosts(rawPosts) {
+  const source = Array.isArray(rawPosts) ? rawPosts : [];
+  return source
+    .map((post) => {
+      const text = String(post?.text || '').trim();
+      const photos = Array.isArray(post?.photos)
+        ? post.photos
+            .map((photo, index) => {
+              const dataUrl =
+                typeof photo === 'string' ? photo : String(photo?.dataUrl || '');
+              if (!dataUrl.startsWith('data:image')) {
+                return null;
+              }
+              return {
+                id: String(photo?.id || `${post?.id || 'post'}-photo-${index}`),
+                name: String(photo?.name || `Photo ${index + 1}`),
+                dataUrl,
+              };
+            })
+            .filter(Boolean)
+        : [];
+
+      if (!text && photos.length === 0) {
+        return null;
+      }
+
+      const comments = Array.isArray(post?.comments)
+        ? post.comments
+            .map((comment) => {
+              const commentText = String(comment?.text || '').trim();
+              if (!commentText) {
+                return null;
+              }
+              return {
+                id: String(comment?.id || randomId()),
+                authorName: String(comment?.authorName || 'Friend'),
+                text: commentText,
+                createdAt: String(comment?.createdAt || new Date().toISOString()),
+              };
+            })
+            .filter(Boolean)
+            .sort((first, second) => String(first.createdAt).localeCompare(String(second.createdAt)))
+        : [];
+
+      const reactions = post?.reactions || {};
+      return {
+        id: String(post?.id || randomId()),
+        text,
+        authorName: String(post?.authorName || 'Friend'),
+        anonymous: Boolean(post?.anonymous),
+        createdAt: String(post?.createdAt || new Date().toISOString()),
+        photos,
+        reactions: {
+          support: Array.isArray(reactions.support) ? reactions.support.map(String) : [],
+          celebrate: Array.isArray(reactions.celebrate) ? reactions.celebrate.map(String) : [],
+          care: Array.isArray(reactions.care) ? reactions.care.map(String) : [],
+        },
+        comments,
+      };
+    })
+    .filter(Boolean)
+    .sort((first, second) => String(second.createdAt).localeCompare(String(first.createdAt)));
+}
+
 function App() {
   const [db, setDb] = useState(loadDb);
   const [tab, setTab] = useState('chat');
@@ -103,6 +169,11 @@ function App() {
   const [diaryQuery, setDiaryQuery] = useState('');
   const [diaryFilterType, setDiaryFilterType] = useState('all');
   const [diaryFilterDate, setDiaryFilterDate] = useState('');
+  const [wallDraft, setWallDraft] = useState('');
+  const [wallAnonymous, setWallAnonymous] = useState(false);
+  const [wallPhotos, setWallPhotos] = useState([]);
+  const [wallPhotoError, setWallPhotoError] = useState('');
+  const [wallCommentDrafts, setWallCommentDrafts] = useState({});
   const [settingsUserId, setSettingsUserId] = useState('');
   const [settingsName, setSettingsName] = useState('');
   const [settingsTime, setSettingsTime] = useState('20:00');
@@ -114,6 +185,7 @@ function App() {
 
   const dashboard = analyzeConversations(activeUser);
   const diaryEntries = normalizeDiaryEntries(activeUser.diaryEntries);
+  const wallPosts = normalizeWallPosts(db.wallPosts);
 
   const diaryStats = diaryEntries.reduce(
     (stats, entry) => {
@@ -417,6 +489,10 @@ function App() {
     setDiaryDetails('');
     setDiaryPhotos([]);
     setDiaryPhotoError('');
+    setWallDraft('');
+    setWallAnonymous(false);
+    setWallPhotos([]);
+    setWallPhotoError('');
     clearDiaryFilters();
   };
 
@@ -430,6 +506,172 @@ function App() {
       const user = next.users[next.activeUserId];
       user.name = settingsName.trim() || 'Friend';
       user.checkInTime = cleanTime;
+      return next;
+    });
+  };
+
+  const handleWallPhotoSelect = async (event) => {
+    const files = Array.from(event.target.files || []);
+    event.target.value = '';
+    setWallPhotoError('');
+
+    if (!files.length) {
+      return;
+    }
+
+    const allowedSlots = Math.max(0, MAX_WALL_PHOTOS_PER_POST - wallPhotos.length);
+    if (allowedSlots === 0) {
+      setWallPhotoError(`You can upload up to ${MAX_WALL_PHOTOS_PER_POST} photos per post.`);
+      return;
+    }
+
+    const nextFiles = files.slice(0, allowedSlots);
+    const convertedPhotos = [];
+
+    for (const file of nextFiles) {
+      if (!String(file.type || '').startsWith('image/')) {
+        setWallPhotoError('Only image files are supported.');
+        continue;
+      }
+
+      if (file.size > MAX_PHOTO_SIZE_BYTES) {
+        setWallPhotoError('Each photo must be 4MB or smaller.');
+        continue;
+      }
+
+      try {
+        const dataUrl = await fileToDataUrl(file);
+        convertedPhotos.push({
+          id: randomId(),
+          name: file.name || 'Photo',
+          dataUrl,
+        });
+      } catch {
+        setWallPhotoError('Could not read one of the selected photos.');
+      }
+    }
+
+    if (convertedPhotos.length) {
+      setWallPhotos((previous) => [...previous, ...convertedPhotos].slice(0, MAX_WALL_PHOTOS_PER_POST));
+    }
+  };
+
+  const removeSelectedWallPhoto = (photoId) => {
+    setWallPhotos((previous) => previous.filter((photo) => photo.id !== photoId));
+  };
+
+  const createWallPost = () => {
+    const text = wallDraft.trim();
+    if (!text && wallPhotos.length === 0) {
+      return;
+    }
+
+    const post = {
+      id: randomId(),
+      text,
+      authorName: activeUser.name,
+      anonymous: wallAnonymous,
+      createdAt: new Date().toISOString(),
+      photos: wallPhotos.map((photo) => ({
+        id: photo.id,
+        name: photo.name,
+        dataUrl: photo.dataUrl,
+      })),
+      reactions: {
+        support: [],
+        celebrate: [],
+        care: [],
+      },
+      comments: [],
+    };
+
+    setDb((previous) => {
+      const next = clone(previous);
+      const existingPosts = Array.isArray(next.wallPosts) ? next.wallPosts : [];
+      next.wallPosts = [post, ...existingPosts];
+      return next;
+    });
+
+    setWallDraft('');
+    setWallAnonymous(false);
+    setWallPhotos([]);
+    setWallPhotoError('');
+  };
+
+  const toggleWallReaction = (postId, reactionKey) => {
+    if (!postId || !['support', 'celebrate', 'care'].includes(reactionKey)) {
+      return;
+    }
+
+    setDb((previous) => {
+      const next = clone(previous);
+      const existingPosts = Array.isArray(next.wallPosts) ? next.wallPosts : [];
+      next.wallPosts = existingPosts.map((post) => {
+        if (String(post?.id) !== String(postId)) {
+          return post;
+        }
+
+        const reactions = post.reactions || {};
+        const users = Array.isArray(reactions[reactionKey]) ? reactions[reactionKey].map(String) : [];
+        const currentUserId = String(next.activeUserId);
+        const hasReacted = users.includes(currentUserId);
+
+        return {
+          ...post,
+          reactions: {
+            support: Array.isArray(reactions.support) ? reactions.support.map(String) : [],
+            celebrate: Array.isArray(reactions.celebrate) ? reactions.celebrate.map(String) : [],
+            care: Array.isArray(reactions.care) ? reactions.care.map(String) : [],
+            [reactionKey]: hasReacted
+              ? users.filter((userId) => userId !== currentUserId)
+              : [...users, currentUserId],
+          },
+        };
+      });
+      return next;
+    });
+  };
+
+  const setWallCommentDraft = (postId, value) => {
+    setWallCommentDrafts((previous) => ({
+      ...previous,
+      [postId]: value,
+    }));
+  };
+
+  const addWallComment = (postId) => {
+    const text = String(wallCommentDrafts[postId] || '').trim();
+    if (!postId || !text) {
+      return;
+    }
+
+    const comment = {
+      id: randomId(),
+      authorName: activeUser.name,
+      text,
+      createdAt: new Date().toISOString(),
+    };
+
+    setDb((previous) => {
+      const next = clone(previous);
+      const existingPosts = Array.isArray(next.wallPosts) ? next.wallPosts : [];
+      next.wallPosts = existingPosts.map((post) => {
+        if (String(post?.id) !== String(postId)) {
+          return post;
+        }
+
+        const existingComments = Array.isArray(post.comments) ? post.comments : [];
+        return {
+          ...post,
+          comments: [...existingComments, comment],
+        };
+      });
+      return next;
+    });
+
+    setWallCommentDrafts((previous) => {
+      const next = { ...previous };
+      delete next[postId];
       return next;
     });
   };
@@ -494,6 +736,27 @@ function App() {
             activeUser={activeUser}
             moodMeta={MOOD_META}
             formatDate={formatDate}
+          />
+        )}
+
+        {tab === 'community' && (
+          <CommunityWallPage
+            activeUser={activeUser}
+            wallDraft={wallDraft}
+            setWallDraft={setWallDraft}
+            wallAnonymous={wallAnonymous}
+            setWallAnonymous={setWallAnonymous}
+            wallPhotos={wallPhotos}
+            wallPhotoError={wallPhotoError}
+            handleWallPhotoSelect={handleWallPhotoSelect}
+            removeSelectedWallPhoto={removeSelectedWallPhoto}
+            createWallPost={createWallPost}
+            wallPosts={wallPosts}
+            toggleWallReaction={toggleWallReaction}
+            wallCommentDrafts={wallCommentDrafts}
+            setWallCommentDraft={setWallCommentDraft}
+            addWallComment={addWallComment}
+            formatTime={formatTime}
           />
         )}
 

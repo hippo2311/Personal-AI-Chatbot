@@ -525,6 +525,7 @@ function MainApp({ authUser, onLogout }) {
   const [friendMessage, setFriendMessage] = useState('');
   const [friendError, setFriendError] = useState('');
   const [authorProfiles, setAuthorProfiles] = useState({});
+  const [conversationsLoaded, setConversationsLoaded] = useState(false);
   const [syncError, setSyncError] = useState('');
 
   const getUserDocumentRef = (userId) => doc(firestoreDb, 'users', userId);
@@ -615,6 +616,7 @@ function MainApp({ authUser, onLogout }) {
     }
 
     setSyncError('');
+    setConversationsLoaded(false);
 
     setDb((previous) => {
       if (previous.users[authId]) {
@@ -760,9 +762,12 @@ function MainApp({ authUser, onLogout }) {
           next.users[authId] = user;
           return next;
         });
+
+        setConversationsLoaded(true);
       },
       () => {
         setSyncError('Cannot read conversations. Check Firestore rules/permissions.');
+        setConversationsLoaded(false);
       }
     );
 
@@ -1130,6 +1135,10 @@ function MainApp({ authUser, onLogout }) {
 
   useEffect(() => {
     const maybeRunReminder = () => {
+      if (!conversationsLoaded) {
+        return;
+      }
+
       const activeUserId = db.activeUserId;
       const userSnapshot = db.users[activeUserId];
       if (!activeUserId || !userSnapshot) {
@@ -1197,11 +1206,11 @@ function MainApp({ authUser, onLogout }) {
     maybeRunReminder();
     const timer = setInterval(maybeRunReminder, REMINDER_POLL_MS);
     return () => clearInterval(timer);
-  }, [db.activeUserId, db.users, activeProfile.checkInTime, activeProfile.name]);
+  }, [db.activeUserId, db.users, activeProfile.checkInTime, activeProfile.name, conversationsLoaded]);
 
   const sendMessage = async (customText) => {
   const text = String(customText ?? draft).trim();
-  if (!text || conversation.ended) {
+  if (!text || conversation.ended || !conversationsLoaded) {
     return;
   }
 
@@ -1252,7 +1261,7 @@ function MainApp({ authUser, onLogout }) {
     // Add AI response to conversation
     const activeUserId = db.activeUserId;
     const userSnapshot = db.users[activeUserId];
-    if (!activeUserId || !userSnapshot) {
+    if (!activeUserId || !userSnapshot || !conversationsLoaded) {
       return;
     }
 
@@ -1375,7 +1384,7 @@ function MainApp({ authUser, onLogout }) {
 
     const activeUserId = db.activeUserId;
     const userSnapshot = db.users[activeUserId];
-    if (!activeUserId || !userSnapshot) {
+    if (!activeUserId || !userSnapshot || !conversationsLoaded) {
       return;
     }
 

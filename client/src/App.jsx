@@ -404,46 +404,6 @@ function ensureDateBucket(dateMap, dateKey) {
   return bucket;
 }
 
-function mergeLegacyDiaryEntriesIntoDates(dateMap, legacyEntries) {
-  if (!Array.isArray(legacyEntries)) {
-    return dateMap;
-  }
-
-  legacyEntries.forEach((entry) => {
-    const bucket = ensureDateBucket(dateMap, entry?.date);
-    const entryId = String(entry?.id || randomId());
-    const normalizedEntry = {
-      ...entry,
-      id: entryId,
-      date: isValidDateKey(entry?.date) ? entry.date : toIsoDate(),
-    };
-    const existingIndex = bucket.diaries.findIndex((item) => String(item?.id) === entryId);
-    if (existingIndex >= 0) {
-      bucket.diaries[existingIndex] = normalizedEntry;
-    } else {
-      bucket.diaries.push(normalizedEntry);
-    }
-  });
-
-  return dateMap;
-}
-
-function normalizeDateMap(rawDates) {
-  const result = {};
-  if (!rawDates || typeof rawDates !== 'object') {
-    return result;
-  }
-
-  Object.entries(rawDates).forEach(([dateKey, value]) => {
-    result[dateKey] = buildDefaultDateBucket({
-      dashboard: value?.dashboard,
-      diaries: Array.isArray(value?.diaries) ? value.diaries : [],
-    });
-  });
-
-  return result;
-}
-
 function normalizeWallPosts(rawPosts) {
   const source = Array.isArray(rawPosts) ? rawPosts : [];
   return source
@@ -934,13 +894,13 @@ function MainApp({ authUser, onLogout }) {
     ? activeProfile.completedChallenges.includes(todayIso)
     : false;
   const diaryStreakDays = computeDateStreak(diaryEntries.map((entry) => entry.date));
-  const friendIds = Array.isArray(activeProfile.friends) ? activeProfile.friends : [];
-  const incomingFriendRequests = Array.isArray(activeProfile.friendRequestsIncoming)
-    ? activeProfile.friendRequestsIncoming
-    : [];
-  const outgoingFriendRequests = Array.isArray(activeProfile.friendRequestsOutgoing)
-    ? activeProfile.friendRequestsOutgoing
-    : [];
+  const friendIds = uniqueStrings(Array.isArray(activeProfile.friends) ? [...activeProfile.friends] : []);
+  const incomingFriendRequests = uniqueStrings(
+    Array.isArray(activeProfile.friendRequestsIncoming) ? [...activeProfile.friendRequestsIncoming] : []
+  );
+  const outgoingFriendRequests = uniqueStrings(
+    Array.isArray(activeProfile.friendRequestsOutgoing) ? [...activeProfile.friendRequestsOutgoing] : []
+  );
   const hiddenPostIds = Array.isArray(activeProfile.hiddenPostIds)
     ? activeProfile.hiddenPostIds
     : [];
@@ -1236,7 +1196,7 @@ function MainApp({ authUser, onLogout }) {
     maybeRunReminder();
     const timer = setInterval(maybeRunReminder, REMINDER_POLL_MS);
     return () => clearInterval(timer);
-  }, [db.activeUserId, activeProfile.checkInTime, activeProfile.name]);
+  }, [db.activeUserId, db.users, activeProfile.checkInTime, activeProfile.name]);
 
   const sendMessage = (customText) => {
     const text = String(customText ?? draft).trim();

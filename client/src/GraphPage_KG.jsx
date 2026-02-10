@@ -23,8 +23,18 @@ const TONE_COLORS = {
   excited:   '#FF6B35',
 };
 
+const ENTITY_COLORS = {
+  place: '#3498db',
+  person: '#e74c3c',
+  food: '#f39c12',
+  activity: '#9b59b6',
+  preference: '#1abc9c',
+  object: '#95a5a6',
+  organization: '#34495e',
+};
+
 function GraphPage({ activeUser, formatDate, formatTime }) {
-  const [graphData, setGraphData] = useState({ nodes: [], edges: [], eventCount: 0 });
+  const [graphData, setGraphData] = useState({ nodes: [], edges: [], eventCount: 0, entityCount: 0 });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [selectedNode, setSelectedNode] = useState(null);
@@ -49,14 +59,13 @@ function GraphPage({ activeUser, formatDate, formatTime }) {
       const response = await fetch(`http://localhost:4000/api/graph/${userId}`);
       if (!response.ok) throw new Error('Failed to load graph');
       const data = await response.json();
+      console.log('📊 Graph data received:', data);
       setGraphData(data);
     } catch (err) {
       setError(err.message);
     }
     setLoading(false);
   };
-
-  // Removed manual extraction - events are now auto-extracted when ending conversations
 
   const deleteEvent = async (eventId) => {
     if (!window.confirm('Delete this event from your life graph?')) return;
@@ -120,11 +129,13 @@ function GraphPage({ activeUser, formatDate, formatTime }) {
     setSvgTransform(prev => ({ ...prev, scale: Math.max(0.3, Math.min(3, prev.scale * delta)) }));
   };
 
-  // Layout event nodes around their domain hubs
-  const layoutEventNodes = () => {
+  // Layout nodes with positions
+  const layoutNodes = () => {
     const eventNodes = graphData.nodes.filter(n => n.type === 'event');
+    const entityNodes = graphData.nodes.filter(n => n.type === 'entity');
     const positioned = [];
 
+    // Position event nodes around their domain hubs
     eventNodes.forEach((node, index) => {
       const primaryDomain = Array.isArray(node.domains) && node.domains.length > 0 
         ? node.domains[0] 
@@ -142,10 +153,54 @@ function GraphPage({ activeUser, formatDate, formatTime }) {
       });
     });
 
+    // Position entity nodes - spread them out more from events
+    entityNodes.forEach((node, index) => {
+      // Find related events to position near them
+      const relatedEdges = graphData.edges.filter(e => 
+        e.target === node.id || e.source === node.id
+      );
+      
+      if (relatedEdges.length > 0) {
+        // Position near related event
+        const relatedEventId = relatedEdges[0].source.startsWith('event:') 
+          ? relatedEdges[0].source 
+          : relatedEdges[0].target;
+        
+        const relatedEvent = positioned.find(n => n.id === relatedEventId);
+        
+        if (relatedEvent) {
+          const angle = (index / Math.max(entityNodes.length, 1)) * Math.PI * 2;
+          const radius = 40 + (index % 2) * 20;
+          
+          positioned.push({
+            ...node,
+            x: relatedEvent.x + Math.cos(angle) * radius,
+            y: relatedEvent.y + Math.sin(angle) * radius,
+          });
+        } else {
+          // Fallback to random position
+          positioned.push({
+            ...node,
+            x: 200 + (index * 80) % 400,
+            y: 200 + ((index * 60) % 300),
+          });
+        }
+      } else {
+        // No relationships, position randomly
+        positioned.push({
+          ...node,
+          x: 200 + (index * 80) % 400,
+          y: 200 + ((index * 60) % 300),
+        });
+      }
+    });
+
     return positioned;
   };
 
-  const eventNodes = layoutEventNodes();
+  const allNodes = layoutNodes();
+  const eventNodes = allNodes.filter(n => n.type === 'event');
+  const entityNodes = allNodes.filter(n => n.type === 'entity');
   const domainNodes = DOMAINS;
 
   if (loading) {
@@ -163,7 +218,10 @@ function GraphPage({ activeUser, formatDate, formatTime }) {
           <h1>Your Life Graph</h1>
           <div className="graph-stats">
             <span className="stat-item">
-              <strong>{graphData.eventCount}</strong> events mapped
+              <strong>{graphData.eventCount}</strong> events
+            </span>
+            <span className="stat-item">
+              <strong>{graphData.entityCount || 0}</strong> entities
             </span>
           </div>
         </div>
@@ -231,24 +289,51 @@ function GraphPage({ activeUser, formatDate, formatTime }) {
               />
             ))}
 
-            {/* Edges: event → domain */}
-            {eventNodes.map(ev => {
-              const primaryDomain = Array.isArray(ev.domains) && ev.domains.length > 0 
-                ? ev.domains[0] 
-                : 'Personal Life';
-              const domain = DOMAINS.find(d => d.id === primaryDomain) || DOMAINS[2];
+            {/* ALL EDGES from database relationships */}
+            {graphData.edges.map((edge, idx) => {
+              const sourceNode = allNodes.find(n => n.id === edge.source) || domainNodes.find(d => `domain:${d.id}` === edge.source);
+              const targetNode = allNodes.find(n => n.id === edge.target) || domainNodes.find(d => `domain:${d.id}` === edge.target);
+              
+              if (!sourceNode || !targetNode) return null;
+              
+              const sx = sourceNode.x;
+              const sy = sourceNode.y;
+              const tx = targetNode.x;
+              const ty = targetNode.y;
+              
+              // Different styles for different edge types
+              const isRelationship = edge.type !== 'BELONGS TO' && edge.type !== 'FOLLOWS';
+              const strokeColor = isRelationship ? '#3498db' : (targetNode.color || '#666');
+              const strokeWidth = isRelationship ? 2 : 1.5;
+              const strokeDash = isRelationship ? '5 3' : '4 3';
+              const opacity = isRelationship ? 0.6 : 0.25;
+              
               return (
-                <line 
-                  key={ev.id + '_edge'}
-                  x1={ev.x} 
-                  y1={ev.y} 
-                  x2={domain.x} 
-                  y2={domain.y}
-                  stroke={domain.color} 
-                  strokeOpacity="0.25" 
-                  strokeWidth="1.5"
-                  strokeDasharray="4 3"
-                />
+                <g key={`edge_${idx}`}>
+                  <line 
+                    x1={sx} 
+                    y1={sy} 
+                    x2={tx} 
+                    y2={ty}
+                    stroke={strokeColor}
+                    strokeOpacity={opacity}
+                    strokeWidth={strokeWidth}
+                    strokeDasharray={strokeDash}
+                  />
+                  {isRelationship && (
+                    <text
+                      x={(sx + tx) / 2}
+                      y={(sy + ty) / 2 - 5}
+                      textAnchor="middle"
+                      fontSize="8"
+                      fill="#3498db"
+                      fillOpacity="0.7"
+                      fontFamily="monospace"
+                    >
+                      {edge.type}
+                    </text>
+                  )}
+                </g>
               );
             })}
 
@@ -287,6 +372,47 @@ function GraphPage({ activeUser, formatDate, formatTime }) {
                 </text>
               </g>
             ))}
+
+            {/* Entity nodes */}
+            {entityNodes.map(entity => {
+              const color = entity.color || ENTITY_COLORS[entity.entityType] || '#95a5a6';
+              const r = 10;
+              const isSelected = selectedNode?.id === entity.id;
+
+              return (
+                <g 
+                  key={entity.id} 
+                  style={{ cursor: 'pointer' }} 
+                  onClick={() => setSelectedNode(isSelected ? null : entity)}
+                >
+                  <circle 
+                    cx={entity.x} 
+                    cy={entity.y} 
+                    r={r + 3} 
+                    fill={color} 
+                    fillOpacity={isSelected ? 0.4 : 0.15} 
+                  />
+                  <circle 
+                    cx={entity.x} 
+                    cy={entity.y} 
+                    r={r} 
+                    fill={color} 
+                    fillOpacity="0.8" 
+                    stroke={color} 
+                    strokeWidth={isSelected ? 2 : 1} 
+                  />
+                  <text
+                    x={entity.x}
+                    y={entity.y + 3}
+                    textAnchor="middle"
+                    fontSize="10"
+                    fill="white"
+                  >
+                    {entity.icon || '⭐'}
+                  </text>
+                </g>
+              );
+            })}
 
             {/* Event nodes */}
             {eventNodes.map(ev => {
@@ -332,7 +458,7 @@ function GraphPage({ activeUser, formatDate, formatTime }) {
             })}
 
             {/* Empty state */}
-            {eventNodes.length === 0 && (
+            {eventNodes.length === 0 && entityNodes.length === 0 && (
               <text 
                 x="400" 
                 y="300" 
@@ -341,7 +467,7 @@ function GraphPage({ activeUser, formatDate, formatTime }) {
                 fontSize="14" 
                 fontFamily="monospace"
               >
-                No events yet. Click "Extract Events from Today" to start mapping your life.
+                No events yet. Start a conversation and end it to extract events.
               </text>
             )}
           </g>
@@ -352,53 +478,82 @@ function GraphPage({ activeUser, formatDate, formatTime }) {
           <div className="node-detail-panel">
             <button className="close-btn" onClick={() => setSelectedNode(null)}>✕</button>
             
-            <div 
-              className="tone-badge" 
-              style={{ background: TONE_COLORS[selectedNode.emotional_tone] || '#95A5A6' }}
-            >
-              {selectedNode.emotional_tone}
-            </div>
-            
-            <p className="event-summary">{selectedNode.summary}</p>
-            
-            <div className="event-meta">
-              <span>⭐ Importance: {selectedNode.importance}/5</span>
-              <span>📅 {formatDate ? formatDate(selectedNode.event_date) : selectedNode.event_date}</span>
-            </div>
+            {selectedNode.type === 'event' && (
+              <>
+                <div 
+                  className="tone-badge" 
+                  style={{ background: TONE_COLORS[selectedNode.emotional_tone] || '#95A5A6' }}
+                >
+                  {selectedNode.emotional_tone}
+                </div>
+                
+                <p className="event-summary">{selectedNode.summary}</p>
+                
+                <div className="event-meta">
+                  <span>⭐ Importance: {selectedNode.importance}/5</span>
+                  <span>📅 {formatDate ? formatDate(selectedNode.event_date) : selectedNode.event_date}</span>
+                </div>
 
-            {selectedNode.keywords?.length > 0 && (
-              <div className="event-keywords">
-                {selectedNode.keywords.map(k => (
-                  <span key={k} className="keyword-tag">{k}</span>
-                ))}
-              </div>
+                {selectedNode.keywords?.length > 0 && (
+                  <div className="event-keywords">
+                    {selectedNode.keywords.map(k => (
+                      <span key={k} className="keyword-tag">{k}</span>
+                    ))}
+                  </div>
+                )}
+
+                <div className="event-domains">
+                  {selectedNode.domains?.map(d => {
+                    const domain = DOMAINS.find(dom => dom.id === d) || DOMAINS[2];
+                    return (
+                      <span 
+                        key={d} 
+                        className="domain-pill"
+                        style={{ 
+                          background: domain.color + '33', 
+                          color: domain.color,
+                          border: `1px solid ${domain.color}66`
+                        }}
+                      >
+                        {domain.icon} {d}
+                      </span>
+                    );
+                  })}
+                </div>
+
+                <button 
+                  className="delete-event-btn" 
+                  onClick={() => deleteEvent(selectedNode.dbId)}
+                >
+                  🗑️ Delete Event
+                </button>
+              </>
             )}
 
-            <div className="event-domains">
-              {selectedNode.domains?.map(d => {
-                const domain = DOMAINS.find(dom => dom.id === d) || DOMAINS[2];
-                return (
-                  <span 
-                    key={d} 
-                    className="domain-pill"
-                    style={{ 
-                      background: domain.color + '33', 
-                      color: domain.color,
-                      border: `1px solid ${domain.color}66`
-                    }}
-                  >
-                    {domain.icon} {d}
-                  </span>
-                );
-              })}
-            </div>
+            {selectedNode.type === 'entity' && (
+              <>
+                <div 
+                  className="tone-badge" 
+                  style={{ background: selectedNode.color || '#95a5a6' }}
+                >
+                  {selectedNode.entityType}
+                </div>
+                
+                <p className="event-summary">{selectedNode.name}</p>
+                
+                <div className="event-meta">
+                  <span>{selectedNode.icon || '⭐'} {selectedNode.entityType}</span>
+                </div>
 
-            <button 
-              className="delete-event-btn" 
-              onClick={() => deleteEvent(selectedNode.dbId)}
-            >
-              🗑️ Delete Event
-            </button>
+                {selectedNode.attributes && Object.keys(selectedNode.attributes).length > 0 && (
+                  <div className="event-keywords">
+                    {Object.entries(selectedNode.attributes).map(([key, value]) => (
+                      <span key={key} className="keyword-tag">{key}: {value}</span>
+                    ))}
+                  </div>
+                )}
+              </>
+            )}
           </div>
         )}
 

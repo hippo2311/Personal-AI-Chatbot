@@ -1197,12 +1197,10 @@ function MainApp({ authUser, onLogout }) {
         });
       }
 
-      if (draftConversation.conversationId) {
-        const conversationRef = getConversationDocumentRef(activeUserId, draftConversation.conversationId);
-        void setDoc(conversationRef, draftConversation).catch(() => {
-          setSyncError('Cannot save your conversation right now. Check database rules/permissions.');
-        });
-      }
+      const conversationRef = getConversationDocumentRef(activeUserId, draftConversation.conversationId);
+      void setDoc(conversationRef, draftConversation).catch(() => {
+        setSyncError('Cannot deliver your automated reminder. Check database rules/permissions.');
+      });
     };
 
     maybeRunReminder();
@@ -1345,56 +1343,76 @@ function MainApp({ authUser, onLogout }) {
     }
   };
 
-  const endConversation = () => {
-    if (conversation.ended || !conversationsLoaded) {
-      return;
+const endConversation = async () => {
+  if (conversation.ended || !conversationsLoaded) {
+    return;
+  }
+
+  const activeUserId = db.activeUserId;
+  const userSnapshot = db.users[activeUserId];
+  if (!activeUserId || !userSnapshot) {
+    return;
+  }
+
+  const profile = userSnapshot.profile || buildDefaultProfile();
+  const { conversation: draftConversation, dateKey, sequenceNumber } = buildConversationDraft(
+    userSnapshot,
+    chatDate
+  );
+
+  draftConversation.date = dateKey;
+  draftConversation.startDate = dateKey;
+  draftConversation.sequenceNumber = sequenceNumber;
+  draftConversation.ended = true;
+  draftConversation.endedAt = new Date().toISOString();
+  draftConversation.messages.push({
+    id: randomId(),
+    sender: 'assistant',
+    text: `Nice check-in today, ${profile.name}. I will ask again at ${profile.checkInTime} tomorrow.`,
+    moodLabel: null,
+    moodScore: null,
+    createdAt: new Date().toISOString(),
+  });
+
+  // Update local state
+  setDb((previous) => {
+    const next = clone(previous);
+    const user = next.users[next.activeUserId];
+    if (!user) {
+      return previous;
     }
+    user.conversations[dateKey] = draftConversation;
+    const sequences = user.conversationSequences || {};
+    sequences[dateKey] = Math.max(sequences[dateKey] || 0, draftConversation.sequenceNumber || 1);
+    user.conversationSequences = sequences;
+    next.users[next.activeUserId] = user;
+    return next;
+  });
 
-    const activeUserId = db.activeUserId;
-    const userSnapshot = db.users[activeUserId];
-    if (!activeUserId || !userSnapshot) {
-      return;
+  // CALL BACKEND API TO TRIGGER AUTO-EXTRACTION
+  try {
+    console.log('🔚 Calling backend to end conversation and extract events...');
+    const response = await fetch(`http://localhost:4000/api/chat/${activeUserId}/end-day`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ date: chatDate }),
+    });
+
+    if (!response.ok) {
+      console.error('❌ Backend end-day failed:', response.status);
+    } else {
+      console.log('✅ Backend end-day succeeded - events should be extracted');
     }
+  } catch (error) {
+    console.error('❌ Failed to call backend end-day:', error);
+  }
 
-    const profile = userSnapshot.profile || buildDefaultProfile();
-    const { conversation: draftConversation, dateKey, sequenceNumber } = buildConversationDraft(
-      userSnapshot,
-      chatDate
-    );
-
-    draftConversation.date = dateKey;
-    draftConversation.startDate = dateKey;
-    draftConversation.sequenceNumber = sequenceNumber;
-    draftConversation.ended = true;
-    draftConversation.endedAt = new Date().toISOString();
-    draftConversation.messages.push({
-      id: randomId(),
-      sender: 'assistant',
-      text: `Nice check-in today, ${profile.name}. I will ask again at ${profile.checkInTime} tomorrow.`,
-      moodLabel: null,
-      moodScore: null,
-      createdAt: new Date().toISOString(),
-    });
-
-    setDb((previous) => {
-      const next = clone(previous);
-      const user = next.users[next.activeUserId];
-      if (!user) {
-        return previous;
-      }
-      user.conversations[dateKey] = draftConversation;
-      const sequences = user.conversationSequences || {};
-      sequences[dateKey] = Math.max(sequences[dateKey] || 0, draftConversation.sequenceNumber || 1);
-      user.conversationSequences = sequences;
-      next.users[next.activeUserId] = user;
-      return next;
-    });
-
-    const conversationRef = getConversationDocumentRef(activeUserId, draftConversation.conversationId);
-    void setDoc(conversationRef, draftConversation).catch(() => {
-      setSyncError('Cannot close your conversation right now. Check database rules/permissions.');
-    });
-  };
+  // Save to Firestore
+  const conversationRef = getConversationDocumentRef(activeUserId, draftConversation.conversationId);
+  void setDoc(conversationRef, draftConversation).catch(() => {
+    setSyncError('Cannot close your conversation right now. Check database rules/permissions.');
+  });
+};
 
   const handleDiaryPhotoSelect = async (event) => {
     const files = Array.from(event.target.files || []);
@@ -1492,7 +1510,6 @@ function MainApp({ authUser, onLogout }) {
       createdAt: new Date().toISOString(),
     };
 
-    let bucketSnapshot = null;
     setDb((previous) => {
       const next = clone(previous);
       const user = next.users[next.activeUserId];
@@ -1507,11 +1524,18 @@ function MainApp({ authUser, onLogout }) {
       bucket.diaries = sortDiaryEntries([entry, ...existingEntries]).filter(
         (diary) => diary.date === entry.date
       );
-      bucketSnapshot = buildDefaultDateBucket(bucket);
       return next;
     });
 
-    if (bucketSnapshot && activeUser.id) {
+    if (activeUser.id) {
+      const activeDates = db.users[activeUser.id]?.dates || {};
+      const bucket = ensureDateBucket(activeDates, entry.date);
+      const existingEntries = Array.isArray(bucket.diaries) ? bucket.diaries : [];
+      bucket.diaries = sortDiaryEntries([entry, ...existingEntries]).filter(
+        (diary) => diary.date === entry.date
+      );
+      const bucketSnapshot = buildDefaultDateBucket(bucket);
+
       void persistDateBucket(activeUser.id, entry.date, bucketSnapshot).catch(() => {
         setSyncError('Cannot save your diary entry to Firestore. Check database rules/permissions.');
       });
@@ -1573,7 +1597,6 @@ function MainApp({ authUser, onLogout }) {
       return;
     }
 
-    const bucketsToPersist = [];
     setDb((previous) => {
       const next = clone(previous);
       const user = next.users[next.activeUserId];
@@ -1591,17 +1614,24 @@ function MainApp({ authUser, onLogout }) {
         const filtered = bucket.diaries.filter((entry) => String(entry?.id) !== String(entryId));
         if (filtered.length !== bucket.diaries.length) {
           bucket.diaries = filtered;
-          bucketsToPersist.push({ dateKey, bucket: buildDefaultDateBucket(bucket) });
         }
       });
       return next;
     });
 
-    if (bucketsToPersist.length && activeUser.id) {
-      bucketsToPersist.forEach(({ dateKey, bucket }) => {
-        void persistDateBucket(activeUser.id, dateKey, bucket).catch(() => {
-          setSyncError('Cannot delete this diary entry in Firestore. Check database rules/permissions.');
-        });
+    if (activeUser.id) {
+      const activeDates = db.users[activeUser.id]?.dates || {};
+      Object.entries(activeDates).forEach(([dateKey, bucket]) => {
+        if (!bucket || !Array.isArray(bucket.diaries)) {
+          return;
+        }
+        const filtered = bucket.diaries.filter((entry) => String(entry?.id) !== String(entryId));
+        if (filtered.length !== bucket.diaries.length) {
+          const updatedBucket = buildDefaultDateBucket({ ...bucket, diaries: filtered });
+          void persistDateBucket(activeUser.id, dateKey, updatedBucket).catch(() => {
+            setSyncError('Cannot delete this diary entry in Firestore. Check database rules/permissions.');
+          });
+        }
       });
     }
   };
@@ -2196,7 +2226,7 @@ function MainApp({ authUser, onLogout }) {
             formatTime={formatTime}
           />
         )}
-        
+
         {tab === 'community' && (
           <CommunityWallPage
             activeUser={activeUser}

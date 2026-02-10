@@ -97,6 +97,23 @@
   color: #c8a96e;
 }
 
+.clear-all-btn {
+  background: #e74c3c22;
+  color: #e74c3c;
+  border: 1px solid #e74c3c44;
+}
+
+.clear-all-btn:hover:not(:disabled) {
+  background: #e74c3c33;
+  border-color: #e74c3c66;
+  transform: translateY(-1px);
+}
+
+.clear-all-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .extract-message {
   padding: 10px 14px;
   border-radius: 8px;

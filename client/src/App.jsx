@@ -1,4 +1,5 @@
 /* eslint-disable react-hooks/set-state-in-effect */
+import GraphPage from './GraphPage.jsx'
 import { useEffect, useRef, useState } from 'react';
 import { onAuthStateChanged, signOut } from 'firebase/auth';
 import {
@@ -999,37 +1000,93 @@ function MainApp({ authUser, onLogout }) {
     return () => clearInterval(timer);
   }, [db.activeUserId, activeProfile.checkInTime, activeProfile.name]);
 
-  const sendMessage = (customText) => {
-    const text = String(customText ?? draft).trim();
-    if (!text || conversation.ended) {
-      return;
+  const sendMessage = async (customText) => {
+  const text = String(customText ?? draft).trim();
+  if (!text || conversation.ended) {
+    return;
+  }
+
+  setDraft('');
+
+  // Add user message to UI immediately
+  setDb((previous) => {
+    const next = clone(previous);
+    const user = next.users[next.activeUserId];
+    if (!user) {
+      return previous;
+    }
+    if (!user.conversations[chatDate]) {
+      user.conversations[chatDate] = buildEmptyConversation(chatDate);
     }
 
-    setDraft('');
+    const currentConversation = user.conversations[chatDate];
+    const mood = scoreMood(text);
 
+    currentConversation.messages.push({
+      id: randomId(),
+      sender: 'user',
+      text,
+      moodLabel: mood.label,
+      moodScore: mood.score,
+      createdAt: new Date().toISOString(),
+    });
+
+    currentConversation.checkInPrompted = true;
+    updateConversationMood(currentConversation);
+    return next;
+  });
+
+  // Call backend API for AI response
+  try {
+    const response = await fetch(`http://localhost:4000/api/chat/${activeUser.id}/message`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text, date: chatDate }),
+    });
+
+    if (!response.ok) {
+      throw new Error('Backend API failed');
+    }
+
+    const data = await response.json();
+    
+    // Add AI response to conversation
     setDb((previous) => {
       const next = clone(previous);
       const user = next.users[next.activeUserId];
-      if (!user) {
+      if (!user || !user.conversations[chatDate]) {
         return previous;
-      }
-      const profile = user.profile || buildDefaultProfile();
-      if (!user.conversations[chatDate]) {
-        user.conversations[chatDate] = buildEmptyConversation(chatDate);
       }
 
       const currentConversation = user.conversations[chatDate];
-      const mood = scoreMood(text);
+      const messages = data.messages || [];
+      const lastMessage = messages[messages.length - 1];
 
-      currentConversation.messages.push({
-        id: randomId(),
-        sender: 'user',
-        text,
-        moodLabel: mood.label,
-        moodScore: mood.score,
-        createdAt: new Date().toISOString(),
-      });
+      if (lastMessage && lastMessage.sender === 'assistant') {
+        currentConversation.messages.push({
+          id: randomId(),
+          sender: 'assistant',
+          text: lastMessage.content,
+          moodLabel: null,
+          moodScore: null,
+          createdAt: new Date().toISOString(),
+        });
+      }
 
+      return next;
+    });
+  } catch (error) {
+    console.error('Failed to get AI response:', error);
+    // Fallback to local reply if API fails
+    setDb((previous) => {
+      const next = clone(previous);
+      const user = next.users[next.activeUserId];
+      if (!user || !user.conversations[chatDate]) {
+        return previous;
+      }
+
+      const profile = user.profile || buildDefaultProfile();
+      const currentConversation = user.conversations[chatDate];
       const userTurns = currentConversation.messages.filter(
         (message) => message.sender === 'user'
       ).length;
@@ -1040,7 +1097,7 @@ function MainApp({ authUser, onLogout }) {
         text: buildAiReply({
           userName: profile.name,
           userText: text,
-          moodLabel: mood.label,
+          moodLabel: scoreMood(text).label,
           userTurns,
         }),
         moodLabel: null,
@@ -1048,11 +1105,10 @@ function MainApp({ authUser, onLogout }) {
         createdAt: new Date().toISOString(),
       });
 
-      currentConversation.checkInPrompted = true;
-      updateConversationMood(currentConversation);
       return next;
     });
-  };
+  }
+};
 
   const endConversation = () => {
     if (conversation.ended) {
@@ -1820,7 +1876,13 @@ function MainApp({ authUser, onLogout }) {
             wallPostsCount={filteredWallPosts.length}
           />
         )}
-
+        {tab === 'graph' && (
+          <GraphPage
+            activeUser={activeUser}
+            formatDate={formatDate}
+            formatTime={formatTime}
+          />
+        )}
         {tab === 'community' && (
           <CommunityWallPage
             activeUser={activeUser}

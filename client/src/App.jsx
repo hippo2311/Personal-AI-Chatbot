@@ -30,6 +30,8 @@ import { auth, db as firestoreDb, storage } from './lib/firebase.js';
 import {
   analyzeConversations,
   buildAiReply,
+  buildDefaultDateBucket,
+  buildDefaultProfile,
   buildDefaultUser,
   buildEmptyConversation,
   clone,
@@ -216,41 +218,189 @@ function normalizePhoto(photo, fallbackId, fallbackName) {
   };
 }
 
-function normalizeDiaryEntries(rawEntries) {
-  const source = Array.isArray(rawEntries) ? rawEntries : [];
-  return sortDiaryEntries(
-    source
-      .map((entry) => {
-        const title = String(entry?.title || '').trim();
-        const details = String(entry?.details || '').trim();
-        const photos = Array.isArray(entry?.photos)
-          ? entry.photos
-              .map((photo, index) => {
-                return normalizePhoto(
-                  photo,
-                  `${entry?.id || 'entry'}-photo-${index}`,
-                  `Photo ${index + 1}`
-                );
-              })
-              .filter(Boolean)
-          : [];
+function normalizeDiaryEntry(entry, fallbackDateKey = toIsoDate(), fallbackIndex = 0) {
+  const title = String(entry?.title || '').trim();
+  const details = String(entry?.details || '').trim();
+  const photos = Array.isArray(entry?.photos)
+    ? entry.photos
+        .map((photo, index) =>
+          normalizePhoto(photo, `${entry?.id || 'entry'}-photo-${index}`, `Photo ${index + 1}`)
+        )
+        .filter(Boolean)
+    : [];
 
-        if (!title && !details && photos.length === 0) {
-          return null;
-        }
+  if (!title && !details && photos.length === 0) {
+    return null;
+  }
 
-        return {
-          id: String(entry?.id || `${entry?.date || toIsoDate()}-${title || details}`),
-          date: isValidDateKey(entry?.date) ? String(entry.date) : toIsoDate(),
-          type: entry?.type === 'bad' ? 'bad' : 'good',
-          title: title || details.slice(0, 80),
-          details,
-          photos,
-          createdAt: String(entry?.createdAt || `${toIsoDate()}T12:00:00.000Z`),
-        };
-      })
-      .filter(Boolean)
-  );
+  const dateKey = isValidDateKey(entry?.date) ? String(entry.date) : fallbackDateKey;
+
+  return {
+    id: String(entry?.id || `${dateKey}-${title || details || fallbackIndex}`),
+    date: dateKey,
+    type: entry?.type === 'bad' ? 'bad' : 'good',
+    title: title || details.slice(0, 80),
+    details,
+    photos,
+    createdAt: String(entry?.createdAt || `${dateKey}T12:00:00.000Z`),
+  };
+}
+
+function normalizeDiaryEntries(rawValue) {
+  if (Array.isArray(rawValue)) {
+    return sortDiaryEntries(
+      rawValue
+        .map((entry, index) => normalizeDiaryEntry(entry, toIsoDate(), index))
+        .filter(Boolean)
+    );
+  }
+
+  if (!rawValue || typeof rawValue !== 'object') {
+    return [];
+  }
+
+  const entries = [];
+  Object.entries(rawValue).forEach(([dateKey, bucket]) => {
+    const diaries = Array.isArray(bucket?.diaries) ? bucket.diaries : [];
+    diaries.forEach((entry, index) => {
+      const normalized = normalizeDiaryEntry(entry, dateKey, index);
+      if (normalized) {
+        entries.push(normalized);
+      }
+    });
+  });
+
+  return sortDiaryEntries(entries);
+}
+
+function normalizeConversationMap(rawValue) {
+  const result = {};
+
+  const assignConversation = (key, conversation = {}) => {
+    const fallbackKey = isValidDateKey(key) ? key : toIsoDate();
+    const dateKey = isValidDateKey(conversation?.date) ? conversation.date : fallbackKey;
+    const base = buildEmptyConversation(dateKey);
+    const normalized = {
+      ...base,
+      ...conversation,
+      date: dateKey,
+      startedAt: conversation?.startedAt || conversation?.started_at || base.startedAt,
+      endedAt: conversation?.endedAt || conversation?.ended_at || base.endedAt,
+      ended: Boolean(
+        conversation?.ended ?? conversation?.isEnded ?? base.ended
+      ),
+      checkInPrompted: Boolean(
+        conversation?.checkInPrompted ?? conversation?.checkInPromptSent ?? base.checkInPrompted
+      ),
+    };
+
+    normalized.messages = Array.isArray(conversation?.messages)
+      ? conversation.messages
+          .map((message, index) => {
+            const text = String(message?.text || message?.content || '').trim();
+            if (!text) {
+              return null;
+            }
+            return {
+              id: String(message?.id || `${dateKey}-message-${index}` || randomId()),
+              sender: message?.sender === 'assistant' ? 'assistant' : 'user',
+              text,
+              moodLabel:
+                typeof message?.moodLabel === 'string'
+                  ? message.moodLabel
+                  : typeof message?.mood_label === 'string'
+                  ? message.mood_label
+                  : null,
+              moodScore:
+                typeof message?.moodScore === 'number'
+                  ? Number(message.moodScore)
+                  : typeof message?.mood_score === 'number'
+                  ? Number(message.mood_score)
+                  : null,
+              createdAt: String(
+                message?.createdAt ||
+                  message?.created_at ||
+                  message?.timestamp ||
+                  message?.sentAt ||
+                  new Date().toISOString()
+              ),
+            };
+          })
+          .filter(Boolean)
+      : [];
+
+    updateConversationMood(normalized);
+    result[dateKey] = normalized;
+  };
+
+  if (Array.isArray(rawValue)) {
+    rawValue.forEach((conversation, index) => {
+      assignConversation(conversation?.date || String(index), conversation || {});
+    });
+    return result;
+  }
+
+  Object.entries(rawValue || {}).forEach(([key, conversation]) => {
+    assignConversation(key, conversation || {});
+  });
+
+  return result;
+}
+
+function ensureDateBucket(dateMap, dateKey) {
+  const safeDate = isValidDateKey(dateKey) ? dateKey : toIsoDate();
+  if (!dateMap[safeDate]) {
+    dateMap[safeDate] = buildDefaultDateBucket();
+    return dateMap[safeDate];
+  }
+
+  const bucket = dateMap[safeDate];
+  if (!bucket.dashboard || !Array.isArray(bucket.diaries)) {
+    dateMap[safeDate] = buildDefaultDateBucket(bucket);
+    return dateMap[safeDate];
+  }
+
+  return bucket;
+}
+
+function mergeLegacyDiaryEntriesIntoDates(dateMap, legacyEntries) {
+  if (!Array.isArray(legacyEntries)) {
+    return dateMap;
+  }
+
+  legacyEntries.forEach((entry) => {
+    const bucket = ensureDateBucket(dateMap, entry?.date);
+    const entryId = String(entry?.id || randomId());
+    const normalizedEntry = {
+      ...entry,
+      id: entryId,
+      date: isValidDateKey(entry?.date) ? entry.date : toIsoDate(),
+    };
+    const existingIndex = bucket.diaries.findIndex((item) => String(item?.id) === entryId);
+    if (existingIndex >= 0) {
+      bucket.diaries[existingIndex] = normalizedEntry;
+    } else {
+      bucket.diaries.push(normalizedEntry);
+    }
+  });
+
+  return dateMap;
+}
+
+function normalizeDateMap(rawDates) {
+  const result = {};
+  if (!rawDates || typeof rawDates !== 'object') {
+    return result;
+  }
+
+  Object.entries(rawDates).forEach(([dateKey, value]) => {
+    result[dateKey] = buildDefaultDateBucket({
+      dashboard: value?.dashboard,
+      diaries: Array.isArray(value?.diaries) ? value.diaries : [],
+    });
+  });
+
+  return result;
 }
 
 function normalizeWallPosts(rawPosts) {
@@ -391,10 +541,10 @@ function MainApp({ authUser, onLogout }) {
         };
       }
       const starterUser = buildDefaultUser(authId);
-      starterUser.name = String(authUser.displayName || authUser.email || 'Friend');
-      starterUser.email = String(authUser.email || '');
-      starterUser.emailLower = String(authUser.email || '').toLowerCase();
-      starterUser.avatarUrl = String(authUser.photoURL || '');
+      starterUser.profile.name = String(authUser.displayName || authUser.email || 'Friend');
+      starterUser.profile.email = String(authUser.email || '');
+      starterUser.profile.emailLower = String(authUser.email || '').toLowerCase();
+      starterUser.profile.avatarUrl = String(authUser.photoURL || '');
       return {
         ...previous,
         activeUserId: authId,
@@ -414,10 +564,10 @@ function MainApp({ authUser, onLogout }) {
     const unsubscribeUser = onSnapshot(userRef, async (snapshot) => {
       if (!snapshot.exists()) {
         const initialUser = buildDefaultUser(authId);
-        initialUser.name = String(authUser.displayName || authUser.email || 'Friend');
-        initialUser.email = String(authUser.email || '');
-        initialUser.emailLower = String(authUser.email || '').toLowerCase();
-        initialUser.avatarUrl = String(authUser.photoURL || '');
+        initialUser.profile.name = String(authUser.displayName || authUser.email || 'Friend');
+        initialUser.profile.email = String(authUser.email || '');
+        initialUser.profile.emailLower = String(authUser.email || '').toLowerCase();
+        initialUser.profile.avatarUrl = String(authUser.photoURL || '');
         try {
           await setDoc(userRef, initialUser);
         } catch {
@@ -438,10 +588,7 @@ function MainApp({ authUser, onLogout }) {
       }
 
       const data = snapshot.data() || {};
-      const normalizedUser = {
-        ...buildDefaultUser(authId),
-        ...data,
-        id: authId,
+      const legacyProfile = {
         name: String(data.name || authUser.displayName || authUser.email || 'Friend'),
         email: String(data.email || authUser.email || ''),
         emailLower: String(data.emailLower || authUser.email || '').toLowerCase(),
@@ -457,9 +604,39 @@ function MainApp({ authUser, onLogout }) {
           ? data.friendRequestsOutgoing.map(String)
           : [],
         hiddenPostIds: Array.isArray(data.hiddenPostIds) ? data.hiddenPostIds.map(String) : [],
-        conversations: data.conversations || {},
-        diaryEntries: Array.isArray(data.diaryEntries) ? data.diaryEntries : [],
       };
+
+      const normalizedUser = buildDefaultUser(authId);
+      const snapshotProfile = typeof data.profile === 'object' ? data.profile : {};
+      normalizedUser.profile = buildDefaultProfile({
+        ...legacyProfile,
+        ...snapshotProfile,
+      });
+      normalizedUser.profile.friends = Array.isArray(normalizedUser.profile.friends)
+        ? normalizedUser.profile.friends.map(String)
+        : [];
+      normalizedUser.profile.friendRequestsIncoming = Array.isArray(
+        normalizedUser.profile.friendRequestsIncoming
+      )
+        ? normalizedUser.profile.friendRequestsIncoming.map(String)
+        : [];
+      normalizedUser.profile.friendRequestsOutgoing = Array.isArray(
+        normalizedUser.profile.friendRequestsOutgoing
+      )
+        ? normalizedUser.profile.friendRequestsOutgoing.map(String)
+        : [];
+      normalizedUser.profile.hiddenPostIds = Array.isArray(normalizedUser.profile.hiddenPostIds)
+        ? normalizedUser.profile.hiddenPostIds.map(String)
+        : [];
+      normalizedUser.profile.completedChallenges = Array.isArray(
+        normalizedUser.profile.completedChallenges
+      )
+        ? normalizedUser.profile.completedChallenges.map(String)
+        : [];
+
+      normalizedUser.conversations = normalizeConversationMap(data.conversations);
+      normalizedUser.dates = normalizeDateMap(data.dates);
+      mergeLegacyDiaryEntriesIntoDates(normalizedUser.dates, data.diaryEntries);
 
       remoteUserHashRef.current = JSON.stringify(normalizedUser);
       setDb((previous) => ({
@@ -502,28 +679,32 @@ function MainApp({ authUser, onLogout }) {
   const activeUser = hasActiveUser
     ? db.users[db.activeUserId]
     : buildDefaultUser(db.activeUserId || String(authUser?.uid || ''));
+  const activeProfile = activeUser.profile || buildDefaultProfile();
+  const activeDates = activeUser.dates || {};
 
   const conversation = getOrCreateConversation(activeUser, chatDate);
   const todayConversation = getOrCreateConversation(activeUser, toIsoDate());
-  const reminderText = getReminderText(activeUser, todayConversation);
+  const reminderText = getReminderText(activeProfile, todayConversation);
 
   const dashboard = analyzeConversations(activeUser);
-  const diaryEntries = normalizeDiaryEntries(activeUser.diaryEntries);
+  const diaryEntries = normalizeDiaryEntries(activeDates);
   const wallPosts = normalizeWallPosts(db.wallPosts);
   const todayIso = toIsoDate();
   const dailyChallenge = getChallengeForDate(todayIso);
-  const challengeCompleted = Array.isArray(activeUser.completedChallenges)
-    ? activeUser.completedChallenges.includes(todayIso)
+  const challengeCompleted = Array.isArray(activeProfile.completedChallenges)
+    ? activeProfile.completedChallenges.includes(todayIso)
     : false;
   const diaryStreakDays = computeDateStreak(diaryEntries.map((entry) => entry.date));
-  const friendIds = Array.isArray(activeUser.friends) ? activeUser.friends : [];
-  const incomingFriendRequests = Array.isArray(activeUser.friendRequestsIncoming)
-    ? activeUser.friendRequestsIncoming
+  const friendIds = Array.isArray(activeProfile.friends) ? activeProfile.friends : [];
+  const incomingFriendRequests = Array.isArray(activeProfile.friendRequestsIncoming)
+    ? activeProfile.friendRequestsIncoming
     : [];
-  const outgoingFriendRequests = Array.isArray(activeUser.friendRequestsOutgoing)
-    ? activeUser.friendRequestsOutgoing
+  const outgoingFriendRequests = Array.isArray(activeProfile.friendRequestsOutgoing)
+    ? activeProfile.friendRequestsOutgoing
     : [];
-  const hiddenPostIds = Array.isArray(activeUser.hiddenPostIds) ? activeUser.hiddenPostIds : [];
+  const hiddenPostIds = Array.isArray(activeProfile.hiddenPostIds)
+    ? activeProfile.hiddenPostIds
+    : [];
 
   const diaryStats = diaryEntries.reduce(
     (stats, entry) => {
@@ -663,18 +844,18 @@ function MainApp({ authUser, onLogout }) {
     if (!hasActiveUser) {
       return;
     }
-    setSettingsName(activeUser.name);
-    setSettingsBio(activeUser.bio || '');
-    setSettingsAvatarUrl(activeUser.avatarUrl || '');
-    setSettingsTime(activeUser.checkInTime);
-    setSettingsNotificationEnabled(Boolean(activeUser.notificationEnabled));
+    setSettingsName(activeProfile.name);
+    setSettingsBio(activeProfile.bio || '');
+    setSettingsAvatarUrl(activeProfile.avatarUrl || '');
+    setSettingsTime(activeProfile.checkInTime);
+    setSettingsNotificationEnabled(Boolean(activeProfile.notificationEnabled));
   }, [
     hasActiveUser,
-    activeUser.name,
-    activeUser.bio,
-    activeUser.avatarUrl,
-    activeUser.checkInTime,
-    activeUser.notificationEnabled,
+    activeProfile.name,
+    activeProfile.bio,
+    activeProfile.avatarUrl,
+    activeProfile.checkInTime,
+    activeProfile.notificationEnabled,
   ]);
 
   useEffect(() => {
@@ -700,14 +881,19 @@ function MainApp({ authUser, onLogout }) {
         }
 
         const data = snapshot.data() || {};
+        const profile = typeof data.profile === 'object' ? data.profile : {};
         return [
           userId,
           {
             id: userId,
-            name: String(data.name || 'Friend'),
-            avatarUrl: String(data.avatarUrl || ''),
-            bio: String(data.bio || ''),
-            friendsCount: Array.isArray(data.friends) ? data.friends.length : 0,
+            name: String(profile.name || data.name || 'Friend'),
+            avatarUrl: String(profile.avatarUrl || data.avatarUrl || ''),
+            bio: String(profile.bio || data.bio || ''),
+            friendsCount: Array.isArray(profile.friends)
+              ? profile.friends.length
+              : Array.isArray(data.friends)
+              ? data.friends.length
+              : 0,
           },
         ];
       })
@@ -768,6 +954,7 @@ function MainApp({ authUser, onLogout }) {
         if (!user) {
           return previous;
         }
+        const profile = user.profile || buildDefaultProfile();
         const today = toIsoDate();
 
         if (!user.conversations[today]) {
@@ -779,14 +966,14 @@ function MainApp({ authUser, onLogout }) {
           return previous;
         }
 
-        if (!isCheckInWindowOpen(user.checkInTime)) {
+        if (!isCheckInWindowOpen(profile.checkInTime)) {
           return previous;
         }
 
         todayLog.messages.push({
           id: randomId(),
           sender: 'assistant',
-          text: `Hi ${user.name}, how was your day today?`,
+          text: `Hi ${profile.name}, how was your day today?`,
           createdAt: new Date().toISOString(),
           moodLabel: null,
           moodScore: null,
@@ -794,13 +981,13 @@ function MainApp({ authUser, onLogout }) {
         todayLog.checkInPrompted = true;
 
         if (
-          user.notificationEnabled &&
+          profile.notificationEnabled &&
           typeof Notification !== 'undefined' &&
           Notification.permission === 'granted'
         ) {
           // Browser-level check-in alert (client-side notification).
           new Notification('DayPulse check-in', {
-            body: `Hi ${user.name}, your daily check-in is ready.`,
+            body: `Hi ${profile.name}, your daily check-in is ready.`,
           });
         }
         return next;
@@ -810,7 +997,7 @@ function MainApp({ authUser, onLogout }) {
     maybeRunReminder();
     const timer = setInterval(maybeRunReminder, REMINDER_POLL_MS);
     return () => clearInterval(timer);
-  }, [db.activeUserId, activeUser.checkInTime, activeUser.name]);
+  }, [db.activeUserId, activeProfile.checkInTime, activeProfile.name]);
 
   const sendMessage = (customText) => {
     const text = String(customText ?? draft).trim();
@@ -826,6 +1013,7 @@ function MainApp({ authUser, onLogout }) {
       if (!user) {
         return previous;
       }
+      const profile = user.profile || buildDefaultProfile();
       if (!user.conversations[chatDate]) {
         user.conversations[chatDate] = buildEmptyConversation(chatDate);
       }
@@ -850,7 +1038,7 @@ function MainApp({ authUser, onLogout }) {
         id: randomId(),
         sender: 'assistant',
         text: buildAiReply({
-          userName: user.name,
+          userName: profile.name,
           userText: text,
           moodLabel: mood.label,
           userTurns,
@@ -877,6 +1065,7 @@ function MainApp({ authUser, onLogout }) {
       if (!user) {
         return previous;
       }
+      const profile = user.profile || buildDefaultProfile();
       if (!user.conversations[chatDate]) {
         user.conversations[chatDate] = buildEmptyConversation(chatDate);
       }
@@ -887,7 +1076,7 @@ function MainApp({ authUser, onLogout }) {
       currentConversation.messages.push({
         id: randomId(),
         sender: 'assistant',
-        text: `Nice check-in today, ${user.name}. I will ask again at ${user.checkInTime} tomorrow.`,
+        text: `Nice check-in today, ${profile.name}. I will ask again at ${profile.checkInTime} tomorrow.`,
         moodLabel: null,
         moodScore: null,
         createdAt: new Date().toISOString(),
@@ -998,8 +1187,14 @@ function MainApp({ authUser, onLogout }) {
       if (!user) {
         return previous;
       }
-      const existingEntries = Array.isArray(user.diaryEntries) ? user.diaryEntries : [];
-      user.diaryEntries = sortDiaryEntries([entry, ...existingEntries]);
+      if (!user.dates || typeof user.dates !== 'object') {
+        user.dates = {};
+      }
+      const bucket = ensureDateBucket(user.dates, entry.date);
+      const existingEntries = Array.isArray(bucket.diaries) ? bucket.diaries : [];
+      bucket.diaries = sortDiaryEntries([entry, ...existingEntries]).filter(
+        (diary) => diary.date === entry.date
+      );
       return next;
     });
 
@@ -1031,8 +1226,12 @@ function MainApp({ authUser, onLogout }) {
       if (!user) {
         return previous;
       }
-      const completedDates = Array.isArray(user.completedChallenges) ? user.completedChallenges : [];
-      user.completedChallenges = uniqueStrings([...completedDates, todayIso]);
+      const profile = user.profile || buildDefaultProfile();
+      const completedDates = Array.isArray(profile.completedChallenges)
+        ? profile.completedChallenges
+        : [];
+      profile.completedChallenges = uniqueStrings([...completedDates, todayIso]);
+      user.profile = profile;
       return next;
     });
   };
@@ -1053,8 +1252,20 @@ function MainApp({ authUser, onLogout }) {
       if (!user) {
         return previous;
       }
-      const existingEntries = Array.isArray(user.diaryEntries) ? user.diaryEntries : [];
-      user.diaryEntries = existingEntries.filter((entry) => String(entry?.id) !== String(entryId));
+      if (!user.dates || typeof user.dates !== 'object') {
+        return previous;
+      }
+
+      Object.keys(user.dates).forEach((dateKey) => {
+        const bucket = user.dates[dateKey];
+        if (!bucket || !Array.isArray(bucket.diaries)) {
+          return;
+        }
+        const filtered = bucket.diaries.filter((entry) => String(entry?.id) !== String(entryId));
+        if (filtered.length !== bucket.diaries.length) {
+          bucket.diaries = filtered;
+        }
+      });
       return next;
     });
   };
@@ -1070,13 +1281,16 @@ function MainApp({ authUser, onLogout }) {
       if (!user) {
         return previous;
       }
-      user.name = settingsName.trim() || 'Friend';
-      user.bio = settingsBio.trim().slice(0, 240);
-      user.avatarUrl = settingsAvatarUrl.trim();
-      user.checkInTime = cleanTime;
-      user.notificationEnabled = Boolean(settingsNotificationEnabled);
-      user.email = String(user.email || authUser.email || '');
-      user.emailLower = String(user.email || authUser.email || '').toLowerCase();
+      const profile = user.profile || buildDefaultProfile();
+      profile.name = settingsName.trim() || 'Friend';
+      profile.bio = settingsBio.trim().slice(0, 240);
+      profile.avatarUrl = settingsAvatarUrl.trim();
+      profile.checkInTime = cleanTime;
+      profile.notificationEnabled = Boolean(settingsNotificationEnabled);
+      const fallbackEmail = String(profile.email || authUser.email || '');
+      profile.email = fallbackEmail;
+      profile.emailLower = fallbackEmail.toLowerCase();
+      user.profile = profile;
       return next;
     });
   };
@@ -1100,7 +1314,7 @@ function MainApp({ authUser, onLogout }) {
     if (trimmed.includes('@')) {
       const lookupQuery = query(
         collection(firestoreDb, 'users'),
-        where('emailLower', '==', trimmed.toLowerCase()),
+        where('profile.emailLower', '==', trimmed.toLowerCase()),
         limit(1)
       );
       const snapshot = await getDocs(lookupQuery);
@@ -1164,10 +1378,10 @@ function MainApp({ authUser, onLogout }) {
       }
 
       await updateDoc(doc(firestoreDb, 'users', activeUser.id), {
-        friendRequestsOutgoing: arrayUnion(targetId),
+        'profile.friendRequestsOutgoing': arrayUnion(targetId),
       });
       await updateDoc(doc(firestoreDb, 'users', targetId), {
-        friendRequestsIncoming: arrayUnion(activeUser.id),
+        'profile.friendRequestsIncoming': arrayUnion(activeUser.id),
       });
 
       setFriendIdentifier('');
@@ -1186,13 +1400,13 @@ function MainApp({ authUser, onLogout }) {
     setFriendMessage('');
     try {
       await updateDoc(doc(firestoreDb, 'users', activeUser.id), {
-        friendRequestsIncoming: arrayRemove(requesterId),
-        friends: arrayUnion(requesterId),
+        'profile.friendRequestsIncoming': arrayRemove(requesterId),
+        'profile.friends': arrayUnion(requesterId),
       });
 
       await updateDoc(doc(firestoreDb, 'users', requesterId), {
-        friendRequestsOutgoing: arrayRemove(activeUser.id),
-        friends: arrayUnion(activeUser.id),
+        'profile.friendRequestsOutgoing': arrayRemove(activeUser.id),
+        'profile.friends': arrayUnion(activeUser.id),
       });
 
       setFriendMessage('Friend request accepted.');
@@ -1210,10 +1424,10 @@ function MainApp({ authUser, onLogout }) {
     setFriendMessage('');
     try {
       await updateDoc(doc(firestoreDb, 'users', activeUser.id), {
-        friendRequestsIncoming: arrayRemove(requesterId),
+        'profile.friendRequestsIncoming': arrayRemove(requesterId),
       });
       await updateDoc(doc(firestoreDb, 'users', requesterId), {
-        friendRequestsOutgoing: arrayRemove(activeUser.id),
+        'profile.friendRequestsOutgoing': arrayRemove(activeUser.id),
       });
       setFriendMessage('Friend request declined.');
     } catch {
@@ -1235,10 +1449,10 @@ function MainApp({ authUser, onLogout }) {
     setFriendMessage('');
     try {
       await updateDoc(doc(firestoreDb, 'users', activeUser.id), {
-        friends: arrayRemove(friendId),
+        'profile.friends': arrayRemove(friendId),
       });
       await updateDoc(doc(firestoreDb, 'users', friendId), {
-        friends: arrayRemove(activeUser.id),
+        'profile.friends': arrayRemove(activeUser.id),
       });
       setFriendMessage('Friend removed.');
     } catch {
@@ -1346,7 +1560,7 @@ function MainApp({ authUser, onLogout }) {
     const nowIso = new Date().toISOString();
     const post = {
       text,
-      authorName: activeUser.name,
+      authorName: activeProfile.name,
       anonymous: wallAnonymous,
       authorId: activeUser.id,
       createdAt: nowIso,
@@ -1431,7 +1645,7 @@ function MainApp({ authUser, onLogout }) {
 
     const comment = {
       id: randomId(),
-      authorName: activeUser.name,
+      authorName: activeProfile.name,
       authorId: activeUser.id,
       text,
       createdAt: new Date().toISOString(),
@@ -1468,12 +1682,14 @@ function MainApp({ authUser, onLogout }) {
       if (!user) {
         return previous;
       }
-      const hiddenIds = Array.isArray(user.hiddenPostIds) ? user.hiddenPostIds : [];
+      const profile = user.profile || buildDefaultProfile();
+      const hiddenIds = Array.isArray(profile.hiddenPostIds) ? profile.hiddenPostIds : [];
       if (hiddenIds.includes(postId)) {
-        user.hiddenPostIds = hiddenIds.filter((id) => id !== postId);
+        profile.hiddenPostIds = hiddenIds.filter((id) => id !== postId);
       } else {
-        user.hiddenPostIds = uniqueStrings([...hiddenIds, postId]);
+        profile.hiddenPostIds = uniqueStrings([...hiddenIds, postId]);
       }
+      user.profile = profile;
       return next;
     });
   };
@@ -1650,7 +1866,7 @@ function MainApp({ authUser, onLogout }) {
         {tab === 'settings' && (
           <SettingsPage
             activeUserId={activeUser.id}
-            activeUserEmail={activeUser.email}
+            activeUserEmail={activeProfile.email}
             settingsName={settingsName}
             setSettingsName={setSettingsName}
             settingsBio={settingsBio}

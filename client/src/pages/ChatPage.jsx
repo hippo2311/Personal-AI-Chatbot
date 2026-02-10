@@ -12,6 +12,7 @@ function ChatPage({
   formatTime,
   moodMeta,
 }) {
+  const profile = activeUser?.profile || {};
   return (
     <section className="panel">
       <div className="panel-header">
@@ -39,7 +40,7 @@ function ChatPage({
         {conversation.messages.length === 0 && (
           <div className="empty-state">
             <p>No messages yet.</p>
-            <p>Wait for {activeUser.checkInTime} or start now by sending your first message.</p>
+            <p>Wait for {profile.checkInTime || '20:00'} or start now by sending your first message.</p>
           </div>
         )}
 
@@ -49,7 +50,7 @@ function ChatPage({
             className={`message ${message.sender === 'assistant' ? 'assistant' : 'user'}`}
           >
             <header>
-              <strong>{message.sender === 'assistant' ? 'AI' : activeUser.name}</strong>
+              <strong>{message.sender === 'assistant' ? 'AI' : profile.name || 'You'}</strong>
               <span>{formatTime(message.createdAt)}</span>
             </header>
             <p>{message.text}</p>

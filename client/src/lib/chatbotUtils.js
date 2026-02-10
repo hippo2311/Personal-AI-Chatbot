@@ -47,9 +47,8 @@ export const DIARY_META = {
   bad: { label: 'Bad thing', marker: 'BAD' },
 };
 
-export function buildDefaultUser(id = 'user-001') {
+export function buildDefaultProfile(overrides = {}) {
   return {
-    id,
     name: 'Friend',
     email: '',
     emailLower: '',
@@ -62,8 +61,16 @@ export function buildDefaultUser(id = 'user-001') {
     friendRequestsIncoming: [],
     friendRequestsOutgoing: [],
     hiddenPostIds: [],
+    ...overrides,
+  };
+}
+
+export function buildDefaultUser(id = 'user-001') {
+  return {
+    id,
+    profile: buildDefaultProfile(),
     conversations: {},
-    diaryEntries: [],
+    dates: {},
   };
 }
 
@@ -105,6 +112,28 @@ export function saveDb(db) {
 
 export function toIsoDate(date = new Date()) {
   return date.toISOString().slice(0, 10);
+}
+
+export function buildDefaultDateBucket(overrides = {}) {
+  const base = {
+    dashboard: {
+      moodLabel: 'neutral',
+      moodScore: 0,
+      ended: false,
+      insights: [],
+      reminderTriggered: false,
+    },
+    diaries: [],
+  };
+
+  const incomingDashboard = overrides?.dashboard || {};
+  return {
+    dashboard: {
+      ...base.dashboard,
+      ...incomingDashboard,
+    },
+    diaries: Array.isArray(overrides?.diaries) ? overrides.diaries : base.diaries,
+  };
 }
 
 export function isValidDateKey(value) {
@@ -226,7 +255,8 @@ export function scoreMood(text) {
 }
 
 export function updateConversationMood(conversation) {
-  const userMessages = conversation.messages.filter(
+  const messages = Array.isArray(conversation?.messages) ? conversation.messages : [];
+  const userMessages = messages.filter(
     (message) => message.sender === 'user' && typeof message.moodScore === 'number'
   );
 
@@ -276,7 +306,12 @@ export function buildAiReply({ userName, userText, moodLabel, userTurns }) {
 }
 
 export function getOrCreateConversation(user, dateKey) {
-  return user.conversations[dateKey] || buildEmptyConversation(dateKey);
+  const safeDate = isValidDateKey(dateKey) ? dateKey : toIsoDate();
+  const conversations =
+    user && user.conversations && typeof user.conversations === 'object'
+      ? user.conversations
+      : {};
+  return conversations[safeDate] || buildEmptyConversation(safeDate);
 }
 
 function dateDiffInDays(laterDateKey, earlierDateKey) {
@@ -333,9 +368,17 @@ function buildInsights(summary, moodBreakdown) {
 }
 
 export function analyzeConversations(user) {
-  const logs = Object.values(user.conversations)
-    .filter((conversation) => conversation.messages.some((message) => message.sender === 'user'))
-    .sort((first, second) => second.date.localeCompare(first.date));
+  const conversations =
+    user && user.conversations && typeof user.conversations === 'object'
+      ? user.conversations
+      : {};
+  const logs = Object.values(conversations)
+    .filter((conversation) =>
+      Array.isArray(conversation?.messages)
+        ? conversation.messages.some((message) => message.sender === 'user')
+        : false
+    )
+    .sort((first, second) => String(second.date).localeCompare(String(first.date)));
 
   const moodBreakdown = {
     great: 0,

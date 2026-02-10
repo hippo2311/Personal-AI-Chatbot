@@ -1,6 +1,7 @@
 const TABS = ['chat', 'diary', 'community', 'dashboard', 'settings'];
 
 function Sidebar({ activeUser, reminderText, tab, setTab, onLogout }) {
+  const profile = activeUser?.profile || {};
   return (
     <aside className="left-panel">
       <h1 className="brand">DayPulse AI</h1>
@@ -10,7 +11,7 @@ function Sidebar({ activeUser, reminderText, tab, setTab, onLogout }) {
 
       <div className="user-card">
         <p className="muted">Active user</p>
-        <h2>{activeUser.name}</h2>
+        <h2>{profile.name || 'Friend'}</h2>
         <p className="mono">{activeUser.id}</p>
         <p className="status">{reminderText}</p>
       </div>

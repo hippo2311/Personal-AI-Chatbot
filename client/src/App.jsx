@@ -1,5 +1,5 @@
 /* eslint-disable react-hooks/set-state-in-effect */
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { onAuthStateChanged, signOut } from 'firebase/auth';
 import {
   arrayRemove,
@@ -13,6 +13,7 @@ import {
   orderBy,
   query,
   setDoc,
+  serverTimestamp,
   updateDoc,
   where,
 } from 'firebase/firestore';
@@ -273,22 +274,58 @@ function normalizeDiaryEntries(rawValue) {
   return sortDiaryEntries(entries);
 }
 
+function parseDateFromKey(key) {
+  if (isValidDateKey(key)) {
+    return key;
+  }
+  if (typeof key === 'string') {
+    const maybeDate = key.slice(0, 10);
+    if (isValidDateKey(maybeDate)) {
+      return maybeDate;
+    }
+  }
+  return toIsoDate();
+}
+
+function parseSequenceFromKey(key) {
+  if (typeof key !== 'string') {
+    return 1;
+  }
+  const parts = key.split('-');
+  const maybeNumber = parts[parts.length - 1];
+  const parsed = Number.parseInt(maybeNumber, 10);
+  if (Number.isFinite(parsed) && parsed > 0) {
+    return parsed;
+  }
+  return 1;
+}
+
 function normalizeConversationMap(rawValue) {
   const result = {};
 
   const assignConversation = (key, conversation = {}) => {
-    const fallbackKey = isValidDateKey(key) ? key : toIsoDate();
-    const dateKey = isValidDateKey(conversation?.date) ? conversation.date : fallbackKey;
+    const fallbackKey = parseDateFromKey(key);
+    const dateKey = isValidDateKey(conversation?.date)
+      ? conversation.date
+      : isValidDateKey(conversation?.startDate)
+      ? conversation.startDate
+      : fallbackKey;
     const base = buildEmptyConversation(dateKey);
+    const conversationId = String(conversation?.conversationId || conversation?.id || key || dateKey);
+    const sequenceNumber = Number(
+      conversation?.sequenceNumber ?? conversation?.sequence ?? parseSequenceFromKey(conversationId)
+    );
+
     const normalized = {
       ...base,
       ...conversation,
       date: dateKey,
+      startDate: dateKey,
+      conversationId,
+      sequenceNumber: Number.isFinite(sequenceNumber) && sequenceNumber > 0 ? sequenceNumber : 1,
       startedAt: conversation?.startedAt || conversation?.started_at || base.startedAt,
       endedAt: conversation?.endedAt || conversation?.ended_at || base.endedAt,
-      ended: Boolean(
-        conversation?.ended ?? conversation?.isEnded ?? base.ended
-      ),
+      ended: Boolean(conversation?.ended ?? conversation?.isEnded ?? base.ended),
       checkInPrompted: Boolean(
         conversation?.checkInPrompted ?? conversation?.checkInPromptSent ?? base.checkInPrompted
       ),
@@ -330,7 +367,11 @@ function normalizeConversationMap(rawValue) {
       : [];
 
     updateConversationMood(normalized);
-    result[dateKey] = normalized;
+
+    const existing = result[dateKey];
+    if (!existing || normalized.sequenceNumber >= (existing.sequenceNumber || 0)) {
+      result[dateKey] = normalized;
+    }
   };
 
   if (Array.isArray(rawValue)) {
@@ -485,7 +526,6 @@ function MainApp({ authUser, onLogout }) {
     users: {},
     wallPosts: [],
   });
-  const remoteUserHashRef = useRef('');
   const [tab, setTab] = useState('chat');
   const [chatDate, setChatDate] = useState(toIsoDate());
   const [draft, setDraft] = useState('');
@@ -526,11 +566,93 @@ function MainApp({ authUser, onLogout }) {
   const [authorProfiles, setAuthorProfiles] = useState({});
   const [syncError, setSyncError] = useState('');
 
+  const getUserDocumentRef = (userId) => doc(firestoreDb, 'users', userId);
+  const getConversationDocumentRef = (userId, conversationId) =>
+    doc(firestoreDb, 'users', userId, 'conversations', conversationId);
+  const getDiaryDocumentRef = (userId, dateKey) => doc(firestoreDb, 'users', userId, 'diaries', dateKey);
+  const getDashboardDocumentRef = (userId, dateKey) =>
+    doc(firestoreDb, 'users', userId, 'dashboard', dateKey);
+
+  const persistDateBucket = (userId, rawDateKey, bucket) => {
+    const safeUserId = String(userId || '').trim();
+    const safeDateKey = isValidDateKey(rawDateKey) ? rawDateKey : toIsoDate();
+    if (!safeUserId || !safeDateKey) {
+      return Promise.resolve();
+    }
+
+    const normalizedBucket = buildDefaultDateBucket(bucket);
+    return Promise.all([
+      setDoc(
+        getDiaryDocumentRef(safeUserId, safeDateKey),
+        {
+          date: safeDateKey,
+          diaries: Array.isArray(normalizedBucket.diaries) ? normalizedBucket.diaries : [],
+        },
+        { merge: true }
+      ),
+      setDoc(
+        getDashboardDocumentRef(safeUserId, safeDateKey),
+        {
+          date: safeDateKey,
+          ...normalizedBucket.dashboard,
+        },
+        { merge: true }
+      ),
+    ]);
+  };
+
+  const buildConversationDraft = (user, rawDateKey) => {
+    const safeDate = isValidDateKey(rawDateKey) ? rawDateKey : toIsoDate();
+    const existing = user?.conversations?.[safeDate];
+    if (existing) {
+      const cloned = clone(existing);
+      if (!cloned.conversationId) {
+        const sequences = user?.conversationSequences || {};
+        const nextSequence = Number(sequences[safeDate] || 0) + 1;
+        cloned.conversationId = `${safeDate}-${String(nextSequence).padStart(2, '0')}`;
+        cloned.sequenceNumber = nextSequence;
+        cloned.startDate = safeDate;
+        return {
+          conversation: cloned,
+          dateKey: safeDate,
+          conversationId: cloned.conversationId,
+          sequenceNumber: nextSequence,
+          isNew: true,
+        };
+      }
+      return {
+        conversation: cloned,
+        dateKey: safeDate,
+        conversationId: cloned.conversationId,
+        sequenceNumber:
+          Number(cloned.sequenceNumber || parseSequenceFromKey(cloned.conversationId)) || 1,
+        isNew: false,
+      };
+    }
+
+    const sequences = user?.conversationSequences || {};
+    const nextSequence = Number(sequences[safeDate] || 0) + 1;
+    const conversationId = `${safeDate}-${String(nextSequence).padStart(2, '0')}`;
+
+    return {
+      conversation: buildEmptyConversation(safeDate, {
+        conversationId,
+        sequenceNumber: nextSequence,
+        startDate: safeDate,
+      }),
+      dateKey: safeDate,
+      conversationId,
+      sequenceNumber: nextSequence,
+      isNew: true,
+    };
+  };
+
   useEffect(() => {
     const authId = String(authUser?.uid || '').trim();
     if (!authId) {
       return;
     }
+
     setSyncError('');
 
     setDb((previous) => {
@@ -555,101 +677,215 @@ function MainApp({ authUser, onLogout }) {
       };
     });
 
-    const userRef = doc(firestoreDb, 'users', authId);
+    const starterProfile = buildDefaultProfile({
+      name: String(authUser.displayName || authUser.email || 'Friend'),
+      email: String(authUser.email || ''),
+      emailLower: String(authUser.email || '').toLowerCase(),
+      avatarUrl: String(authUser.photoURL || ''),
+    });
+
+    const userRef = getUserDocumentRef(authId);
+    const conversationsRef = collection(userRef, 'conversations');
+    const diariesRef = collection(userRef, 'diaries');
+    const dashboardRef = collection(userRef, 'dashboard');
     const wallPostsQuery = query(
       collection(firestoreDb, 'wallPosts'),
       orderBy('createdAtMs', 'desc')
     );
 
-    const unsubscribeUser = onSnapshot(userRef, async (snapshot) => {
-      if (!snapshot.exists()) {
-        const initialUser = buildDefaultUser(authId);
-        initialUser.profile.name = String(authUser.displayName || authUser.email || 'Friend');
-        initialUser.profile.email = String(authUser.email || '');
-        initialUser.profile.emailLower = String(authUser.email || '').toLowerCase();
-        initialUser.profile.avatarUrl = String(authUser.photoURL || '');
-        try {
-          await setDoc(userRef, initialUser);
-        } catch {
-          setSyncError(
-            'Cannot create your Firestore user profile. Check Firestore database and security rules.'
-          );
+    const ensureUserDoc = async () => {
+      try {
+        const snapshot = await getDoc(userRef);
+        if (!snapshot.exists()) {
+          await setDoc(userRef, {
+            id: authId,
+            userId: authId,
+            ...starterProfile,
+            createdAt: serverTimestamp(),
+          });
         }
-        remoteUserHashRef.current = JSON.stringify(initialUser);
-        setDb((previous) => ({
-          ...previous,
-          activeUserId: authId,
-          users: {
-            ...previous.users,
-            [authId]: initialUser,
-          },
-        }));
-        return;
+      } catch {
+        setSyncError('Cannot create root user document in Firestore. Check database rules.');
       }
+    };
+    void ensureUserDoc();
 
-      const data = snapshot.data() || {};
-      const legacyProfile = {
-        name: String(data.name || authUser.displayName || authUser.email || 'Friend'),
-        email: String(data.email || authUser.email || ''),
-        emailLower: String(data.emailLower || authUser.email || '').toLowerCase(),
-        bio: String(data.bio || ''),
-        avatarUrl: String(data.avatarUrl || authUser.photoURL || ''),
-        notificationEnabled: Boolean(data.notificationEnabled),
-        completedChallenges: Array.isArray(data.completedChallenges) ? data.completedChallenges : [],
-        friends: Array.isArray(data.friends) ? data.friends.map(String) : [],
-        friendRequestsIncoming: Array.isArray(data.friendRequestsIncoming)
-          ? data.friendRequestsIncoming.map(String)
-          : [],
-        friendRequestsOutgoing: Array.isArray(data.friendRequestsOutgoing)
-          ? data.friendRequestsOutgoing.map(String)
-          : [],
-        hiddenPostIds: Array.isArray(data.hiddenPostIds) ? data.hiddenPostIds.map(String) : [],
-      };
+    const unsubscribeUserDoc = onSnapshot(
+      userRef,
+      async (snapshot) => {
+        if (!snapshot.exists()) {
+          await ensureUserDoc();
+          return;
+        }
 
-      const normalizedUser = buildDefaultUser(authId);
-      const snapshotProfile = typeof data.profile === 'object' ? data.profile : {};
-      normalizedUser.profile = buildDefaultProfile({
-        ...legacyProfile,
-        ...snapshotProfile,
-      });
-      normalizedUser.profile.friends = Array.isArray(normalizedUser.profile.friends)
-        ? normalizedUser.profile.friends.map(String)
-        : [];
-      normalizedUser.profile.friendRequestsIncoming = Array.isArray(
-        normalizedUser.profile.friendRequestsIncoming
-      )
-        ? normalizedUser.profile.friendRequestsIncoming.map(String)
-        : [];
-      normalizedUser.profile.friendRequestsOutgoing = Array.isArray(
-        normalizedUser.profile.friendRequestsOutgoing
-      )
-        ? normalizedUser.profile.friendRequestsOutgoing.map(String)
-        : [];
-      normalizedUser.profile.hiddenPostIds = Array.isArray(normalizedUser.profile.hiddenPostIds)
-        ? normalizedUser.profile.hiddenPostIds.map(String)
-        : [];
-      normalizedUser.profile.completedChallenges = Array.isArray(
-        normalizedUser.profile.completedChallenges
-      )
-        ? normalizedUser.profile.completedChallenges.map(String)
-        : [];
+        const data = snapshot.data() || {};
+        const normalizedProfile = buildDefaultProfile({
+          name: data.name || authUser.displayName || authUser.email || 'Friend',
+          email: data.email || authUser.email || '',
+          emailLower: String(data.email || authUser.email || '').toLowerCase(),
+          avatarUrl: data.avatarUrl || authUser.photoURL || '',
+          bio: String(data.bio || ''),
+          checkInTime: data.checkInTime || '20:00',
+          notificationEnabled: Boolean(data.notificationEnabled),
+          completedChallenges: Array.isArray(data.completedChallenges)
+            ? data.completedChallenges
+            : [],
+          friends: Array.isArray(data.friends) ? data.friends.map(String) : [],
+          friendRequestsIncoming: Array.isArray(data.friendRequestsIncoming)
+            ? data.friendRequestsIncoming.map(String)
+            : [],
+          friendRequestsOutgoing: Array.isArray(data.friendRequestsOutgoing)
+            ? data.friendRequestsOutgoing.map(String)
+            : [],
+          hiddenPostIds: Array.isArray(data.hiddenPostIds)
+            ? data.hiddenPostIds.map(String)
+            : [],
+        });
+        const incomingSequences =
+          data.conversationSequences && typeof data.conversationSequences === 'object'
+            ? data.conversationSequences
+            : null;
 
-      normalizedUser.conversations = normalizeConversationMap(data.conversations);
-      normalizedUser.dates = normalizeDateMap(data.dates);
-      mergeLegacyDiaryEntriesIntoDates(normalizedUser.dates, data.diaryEntries);
+        setDb((previous) => {
+          const next = clone(previous);
+          next.activeUserId = authId;
+          const user = next.users[authId] || buildDefaultUser(authId);
+          user.profile = normalizedProfile;
+          if (incomingSequences) {
+            user.conversationSequences = incomingSequences;
+          }
+          next.users[authId] = user;
+          return next;
+        });
+      },
+      () => {
+        setSyncError('Cannot read your user document. Check Firestore rules/permissions.');
+      }
+    );
 
-      remoteUserHashRef.current = JSON.stringify(normalizedUser);
-      setDb((previous) => ({
-        ...previous,
-        activeUserId: authId,
-        users: {
-          ...previous.users,
-          [authId]: normalizedUser,
-        },
-      }));
-    }, () => {
-      setSyncError('Cannot read user data from Firestore. Check database rules/permissions.');
-    });
+    const unsubscribeConversations = onSnapshot(
+      conversationsRef,
+      (snapshot) => {
+        const rawConversations = {};
+        const sequenceMap = {};
+        snapshot.forEach((conversationDoc) => {
+          const data = conversationDoc.data() || {};
+          const docId = conversationDoc.id;
+          const startDate = isValidDateKey(data.startDate)
+            ? data.startDate
+            : parseDateFromKey(docId);
+          const sequenceNumber = Number(
+            data.sequenceNumber ?? data.sequence ?? parseSequenceFromKey(docId)
+          );
+          rawConversations[docId] = {
+            ...data,
+            conversationId: docId,
+            startDate,
+            date: data.date || startDate,
+            sequenceNumber: Number.isFinite(sequenceNumber) && sequenceNumber > 0 ? sequenceNumber : 1,
+          };
+          const dateKey = rawConversations[docId].date;
+          sequenceMap[dateKey] = Math.max(sequenceMap[dateKey] || 0, rawConversations[docId].sequenceNumber);
+        });
+
+        const normalized = normalizeConversationMap(rawConversations);
+
+        setDb((previous) => {
+          const next = clone(previous);
+          next.activeUserId = authId;
+          const user = next.users[authId] || buildDefaultUser(authId);
+          user.conversations = normalized;
+          user.conversationSequences = sequenceMap;
+          next.users[authId] = user;
+          return next;
+        });
+      },
+      () => {
+        setSyncError('Cannot read conversations. Check Firestore rules/permissions.');
+      }
+    );
+
+    const unsubscribeDiaries = onSnapshot(
+      diariesRef,
+      (snapshot) => {
+        setDb((previous) => {
+          const next = clone(previous);
+          next.activeUserId = authId;
+          const user = next.users[authId] || buildDefaultUser(authId);
+          const updatedDates = { ...user.dates };
+          const seenDates = new Set();
+
+          snapshot.forEach((diaryDoc) => {
+            const data = diaryDoc.data() || {};
+            const dateKey = isValidDateKey(data.date) ? data.date : parseDateFromKey(diaryDoc.id);
+            seenDates.add(dateKey);
+            const existingBucket = updatedDates[dateKey] || buildDefaultDateBucket();
+            const normalizedEntries = Array.isArray(data.diaries)
+              ? data.diaries
+                  .map((entry, index) => normalizeDiaryEntry(entry, dateKey, index))
+                  .filter(Boolean)
+              : [];
+
+            updatedDates[dateKey] = buildDefaultDateBucket({
+              dashboard: existingBucket.dashboard,
+              diaries: normalizedEntries,
+            });
+          });
+
+          Object.keys(updatedDates).forEach((dateKey) => {
+            if (!seenDates.has(dateKey)) {
+              const bucket = updatedDates[dateKey] || buildDefaultDateBucket();
+              updatedDates[dateKey] = buildDefaultDateBucket({
+                dashboard: bucket.dashboard,
+                diaries: [],
+              });
+            }
+          });
+
+          user.dates = updatedDates;
+          next.users[authId] = user;
+          return next;
+        });
+      },
+      () => {
+        setSyncError('Cannot read diaries. Check Firestore rules/permissions.');
+      }
+    );
+
+    const unsubscribeDashboard = onSnapshot(
+      dashboardRef,
+      (snapshot) => {
+        setDb((previous) => {
+          const next = clone(previous);
+          next.activeUserId = authId;
+          const user = next.users[authId] || buildDefaultUser(authId);
+          const updatedDates = { ...user.dates };
+
+          snapshot.forEach((dashboardDoc) => {
+            const data = dashboardDoc.data() || {};
+            const dateKey = isValidDateKey(data.date)
+              ? data.date
+              : parseDateFromKey(dashboardDoc.id);
+            const existingBucket = updatedDates[dateKey] || buildDefaultDateBucket();
+            updatedDates[dateKey] = buildDefaultDateBucket({
+              diaries: existingBucket.diaries,
+              dashboard: {
+                ...existingBucket.dashboard,
+                ...data,
+                date: undefined,
+              },
+            });
+          });
+
+          user.dates = updatedDates;
+          next.users[authId] = user;
+          return next;
+        });
+      },
+      () => {
+        setSyncError('Cannot read dashboard insights. Check Firestore rules/permissions.');
+      }
+    );
 
     const unsubscribeWall = onSnapshot(
       wallPostsQuery,
@@ -670,7 +906,10 @@ function MainApp({ authUser, onLogout }) {
     );
 
     return () => {
-      unsubscribeUser();
+      unsubscribeUserDoc();
+      unsubscribeConversations();
+      unsubscribeDiaries();
+      unsubscribeDashboard();
       unsubscribeWall();
     };
   }, [authUser?.uid, authUser?.displayName, authUser?.email, authUser?.photoURL]);
@@ -818,27 +1057,6 @@ function MainApp({ authUser, onLogout }) {
     avatarUrl: authorProfiles[userId]?.avatarUrl || '',
   }));
 
-  useEffect(() => {
-    const activeUserId = db.activeUserId;
-    if (!activeUserId) {
-      return;
-    }
-
-    const user = db.users[activeUserId];
-    if (!user) {
-      return;
-    }
-
-    const localHash = JSON.stringify(user);
-    if (localHash === remoteUserHashRef.current) {
-      return;
-    }
-
-    remoteUserHashRef.current = localHash;
-    void setDoc(doc(firestoreDb, 'users', activeUserId), user).catch(() => {
-      setSyncError('Cannot sync your updates to Firestore. Check database rules/permissions.');
-    });
-  }, [db.activeUserId, db.users]);
 
   useEffect(() => {
     if (!hasActiveUser) {
@@ -875,25 +1093,20 @@ function MainApp({ authUser, onLogout }) {
 
     void Promise.all(
       missingIds.map(async (userId) => {
-        const snapshot = await getDoc(doc(firestoreDb, 'users', userId));
+        const snapshot = await getDoc(getUserDocumentRef(userId));
         if (!snapshot.exists()) {
           return null;
         }
 
-        const data = snapshot.data() || {};
-        const profile = typeof data.profile === 'object' ? data.profile : {};
+        const profile = snapshot.data() || {};
         return [
           userId,
           {
             id: userId,
-            name: String(profile.name || data.name || 'Friend'),
-            avatarUrl: String(profile.avatarUrl || data.avatarUrl || ''),
-            bio: String(profile.bio || data.bio || ''),
-            friendsCount: Array.isArray(profile.friends)
-              ? profile.friends.length
-              : Array.isArray(data.friends)
-              ? data.friends.length
-              : 0,
+            name: String(profile.name || 'Friend'),
+            avatarUrl: String(profile.avatarUrl || ''),
+            bio: String(profile.bio || ''),
+            friendsCount: Array.isArray(profile.friends) ? profile.friends.length : 0,
           },
         ];
       })
@@ -938,8 +1151,16 @@ function MainApp({ authUser, onLogout }) {
       if (!user) {
         return previous;
       }
-      if (!user.conversations[chatDate]) {
-        user.conversations[chatDate] = buildEmptyConversation(chatDate);
+      const { conversation, dateKey, sequenceNumber, isNew } = buildConversationDraft(
+        user,
+        chatDate
+      );
+      if (!user.conversations[dateKey] || isNew) {
+        user.conversations[dateKey] = conversation;
+        const sequences = user.conversationSequences || {};
+        sequences[dateKey] = Math.max(sequences[dateKey] || 0, sequenceNumber);
+        user.conversationSequences = sequences;
+        next.users[next.activeUserId] = user;
         return next;
       }
       return previous;
@@ -948,49 +1169,67 @@ function MainApp({ authUser, onLogout }) {
 
   useEffect(() => {
     const maybeRunReminder = () => {
+      const activeUserId = db.activeUserId;
+      const userSnapshot = db.users[activeUserId];
+      if (!activeUserId || !userSnapshot) {
+        return;
+      }
+
+      const profile = userSnapshot.profile || buildDefaultProfile();
+      if (!isCheckInWindowOpen(profile.checkInTime)) {
+        return;
+      }
+
+      const today = toIsoDate();
+      const { conversation: draftConversation, dateKey, sequenceNumber } = buildConversationDraft(
+        userSnapshot,
+        today
+      );
+
+      if (draftConversation.ended || draftConversation.checkInPrompted) {
+        return;
+      }
+
+      draftConversation.date = dateKey;
+      draftConversation.startDate = dateKey;
+      draftConversation.sequenceNumber = sequenceNumber;
+      draftConversation.messages.push({
+        id: randomId(),
+        sender: 'assistant',
+        text: `Hi ${profile.name}, how was your day today?`,
+        createdAt: new Date().toISOString(),
+        moodLabel: null,
+        moodScore: null,
+      });
+      draftConversation.checkInPrompted = true;
+
       setDb((previous) => {
         const next = clone(previous);
         const user = next.users[next.activeUserId];
         if (!user) {
           return previous;
         }
-        const profile = user.profile || buildDefaultProfile();
-        const today = toIsoDate();
-
-        if (!user.conversations[today]) {
-          user.conversations[today] = buildEmptyConversation(today);
-        }
-
-        const todayLog = user.conversations[today];
-        if (todayLog.ended || todayLog.checkInPrompted) {
-          return previous;
-        }
-
-        if (!isCheckInWindowOpen(profile.checkInTime)) {
-          return previous;
-        }
-
-        todayLog.messages.push({
-          id: randomId(),
-          sender: 'assistant',
-          text: `Hi ${profile.name}, how was your day today?`,
-          createdAt: new Date().toISOString(),
-          moodLabel: null,
-          moodScore: null,
-        });
-        todayLog.checkInPrompted = true;
-
-        if (
-          profile.notificationEnabled &&
-          typeof Notification !== 'undefined' &&
-          Notification.permission === 'granted'
-        ) {
-          // Browser-level check-in alert (client-side notification).
-          new Notification('DayPulse check-in', {
-            body: `Hi ${profile.name}, your daily check-in is ready.`,
-          });
-        }
+        user.conversations[dateKey] = draftConversation;
+        const sequences = user.conversationSequences || {};
+        sequences[dateKey] = Math.max(sequences[dateKey] || 0, draftConversation.sequenceNumber || 1);
+        user.conversationSequences = sequences;
+        next.users[next.activeUserId] = user;
         return next;
+      });
+
+      if (
+        profile.notificationEnabled &&
+        typeof Notification !== 'undefined' &&
+        Notification.permission === 'granted'
+      ) {
+        new Notification('DayPulse check-in', {
+          body: `Hi ${profile.name}, your daily check-in is ready.`,
+        });
+      }
+
+      const conversationRef = getConversationDocumentRef(activeUserId, draftConversation.conversationId);
+      void setDoc(conversationRef, draftConversation).catch(() => {
+        setSyncError('Cannot deliver your automated reminder. Check database rules/permissions.');
       });
     };
 
@@ -1007,50 +1246,69 @@ function MainApp({ authUser, onLogout }) {
 
     setDraft('');
 
+    const activeUserId = db.activeUserId;
+    const userSnapshot = db.users[activeUserId];
+    if (!activeUserId || !userSnapshot) {
+      return;
+    }
+
+    const profile = userSnapshot.profile || buildDefaultProfile();
+    const { conversation: draftConversation, dateKey, sequenceNumber } = buildConversationDraft(
+      userSnapshot,
+      chatDate
+    );
+
+    draftConversation.date = dateKey;
+    draftConversation.startDate = dateKey;
+    draftConversation.sequenceNumber = sequenceNumber;
+
+    const mood = scoreMood(text);
+
+    draftConversation.messages.push({
+      id: randomId(),
+      sender: 'user',
+      text,
+      moodLabel: mood.label,
+      moodScore: mood.score,
+      createdAt: new Date().toISOString(),
+    });
+
+    const userTurns = draftConversation.messages.filter((message) => message.sender === 'user').length;
+
+    draftConversation.messages.push({
+      id: randomId(),
+      sender: 'assistant',
+      text: buildAiReply({
+        userName: profile.name,
+        userText: text,
+        moodLabel: mood.label,
+        userTurns,
+      }),
+      moodLabel: null,
+      moodScore: null,
+      createdAt: new Date().toISOString(),
+    });
+
+    draftConversation.checkInPrompted = true;
+    updateConversationMood(draftConversation);
+
     setDb((previous) => {
       const next = clone(previous);
       const user = next.users[next.activeUserId];
       if (!user) {
         return previous;
       }
-      const profile = user.profile || buildDefaultProfile();
-      if (!user.conversations[chatDate]) {
-        user.conversations[chatDate] = buildEmptyConversation(chatDate);
-      }
-
-      const currentConversation = user.conversations[chatDate];
-      const mood = scoreMood(text);
-
-      currentConversation.messages.push({
-        id: randomId(),
-        sender: 'user',
-        text,
-        moodLabel: mood.label,
-        moodScore: mood.score,
-        createdAt: new Date().toISOString(),
-      });
-
-      const userTurns = currentConversation.messages.filter(
-        (message) => message.sender === 'user'
-      ).length;
-
-      currentConversation.messages.push({
-        id: randomId(),
-        sender: 'assistant',
-        text: buildAiReply({
-          userName: profile.name,
-          userText: text,
-          moodLabel: mood.label,
-          userTurns,
-        }),
-        moodLabel: null,
-        moodScore: null,
-        createdAt: new Date().toISOString(),
-      });
-
-      currentConversation.checkInPrompted = true;
-      updateConversationMood(currentConversation);
+      user.conversations[dateKey] = draftConversation;
+      const sequences = user.conversationSequences || {};
+      sequences[dateKey] = Math.max(sequences[dateKey] || 0, draftConversation.sequenceNumber || 1);
+      user.conversationSequences = sequences;
+      next.users[next.activeUserId] = user;
       return next;
+    });
+
+    const conversationRef = getConversationDocumentRef(activeUserId, draftConversation.conversationId);
+    void setDoc(conversationRef, draftConversation).catch(() => {
+      setSyncError('Cannot save your conversation right now. Check database rules/permissions.');
     });
   };
 
@@ -1059,29 +1317,49 @@ function MainApp({ authUser, onLogout }) {
       return;
     }
 
+    const activeUserId = db.activeUserId;
+    const userSnapshot = db.users[activeUserId];
+    if (!activeUserId || !userSnapshot) {
+      return;
+    }
+
+    const profile = userSnapshot.profile || buildDefaultProfile();
+    const { conversation: draftConversation, dateKey, sequenceNumber } = buildConversationDraft(
+      userSnapshot,
+      chatDate
+    );
+
+    draftConversation.date = dateKey;
+    draftConversation.startDate = dateKey;
+    draftConversation.sequenceNumber = sequenceNumber;
+    draftConversation.ended = true;
+    draftConversation.endedAt = new Date().toISOString();
+    draftConversation.messages.push({
+      id: randomId(),
+      sender: 'assistant',
+      text: `Nice check-in today, ${profile.name}. I will ask again at ${profile.checkInTime} tomorrow.`,
+      moodLabel: null,
+      moodScore: null,
+      createdAt: new Date().toISOString(),
+    });
+
     setDb((previous) => {
       const next = clone(previous);
       const user = next.users[next.activeUserId];
       if (!user) {
         return previous;
       }
-      const profile = user.profile || buildDefaultProfile();
-      if (!user.conversations[chatDate]) {
-        user.conversations[chatDate] = buildEmptyConversation(chatDate);
-      }
-
-      const currentConversation = user.conversations[chatDate];
-      currentConversation.ended = true;
-      currentConversation.endedAt = new Date().toISOString();
-      currentConversation.messages.push({
-        id: randomId(),
-        sender: 'assistant',
-        text: `Nice check-in today, ${profile.name}. I will ask again at ${profile.checkInTime} tomorrow.`,
-        moodLabel: null,
-        moodScore: null,
-        createdAt: new Date().toISOString(),
-      });
+      user.conversations[dateKey] = draftConversation;
+      const sequences = user.conversationSequences || {};
+      sequences[dateKey] = Math.max(sequences[dateKey] || 0, draftConversation.sequenceNumber || 1);
+      user.conversationSequences = sequences;
+      next.users[next.activeUserId] = user;
       return next;
+    });
+
+    const conversationRef = getConversationDocumentRef(activeUserId, draftConversation.conversationId);
+    void setDoc(conversationRef, draftConversation).catch(() => {
+      setSyncError('Cannot close your conversation right now. Check database rules/permissions.');
     });
   };
 
@@ -1181,6 +1459,7 @@ function MainApp({ authUser, onLogout }) {
       createdAt: new Date().toISOString(),
     };
 
+    let bucketSnapshot = null;
     setDb((previous) => {
       const next = clone(previous);
       const user = next.users[next.activeUserId];
@@ -1195,8 +1474,15 @@ function MainApp({ authUser, onLogout }) {
       bucket.diaries = sortDiaryEntries([entry, ...existingEntries]).filter(
         (diary) => diary.date === entry.date
       );
+      bucketSnapshot = buildDefaultDateBucket(bucket);
       return next;
     });
+
+    if (bucketSnapshot && activeUser.id) {
+      void persistDateBucket(activeUser.id, entry.date, bucketSnapshot).catch(() => {
+        setSyncError('Cannot save your diary entry to Firestore. Check database rules/permissions.');
+      });
+    }
 
     setDiaryTitle('');
     setDiaryDetails('');
@@ -1216,9 +1502,14 @@ function MainApp({ authUser, onLogout }) {
   };
 
   const completeDailyChallenge = () => {
-    if (challengeCompleted) {
+    if (challengeCompleted || !activeUser.id) {
       return;
     }
+
+    const previousCompleted = Array.isArray(activeProfile.completedChallenges)
+      ? activeProfile.completedChallenges
+      : [];
+    const nextCompleted = uniqueStrings([...previousCompleted, todayIso]);
 
     setDb((previous) => {
       const next = clone(previous);
@@ -1227,12 +1518,15 @@ function MainApp({ authUser, onLogout }) {
         return previous;
       }
       const profile = user.profile || buildDefaultProfile();
-      const completedDates = Array.isArray(profile.completedChallenges)
-        ? profile.completedChallenges
-        : [];
-      profile.completedChallenges = uniqueStrings([...completedDates, todayIso]);
+      profile.completedChallenges = nextCompleted;
       user.profile = profile;
       return next;
+    });
+
+    void updateDoc(getUserDocumentRef(activeUser.id), {
+      completedChallenges: nextCompleted,
+    }).catch(() => {
+      setSyncError('Cannot save your challenge progress. Check Firestore rules/permissions.');
     });
   };
 
@@ -1246,6 +1540,7 @@ function MainApp({ authUser, onLogout }) {
       return;
     }
 
+    const bucketsToPersist = [];
     setDb((previous) => {
       const next = clone(previous);
       const user = next.users[next.activeUserId];
@@ -1256,24 +1551,41 @@ function MainApp({ authUser, onLogout }) {
         return previous;
       }
 
-      Object.keys(user.dates).forEach((dateKey) => {
-        const bucket = user.dates[dateKey];
+      Object.entries(user.dates).forEach(([dateKey, bucket]) => {
         if (!bucket || !Array.isArray(bucket.diaries)) {
           return;
         }
         const filtered = bucket.diaries.filter((entry) => String(entry?.id) !== String(entryId));
         if (filtered.length !== bucket.diaries.length) {
           bucket.diaries = filtered;
+          bucketsToPersist.push({ dateKey, bucket: buildDefaultDateBucket(bucket) });
         }
       });
       return next;
     });
+
+    if (bucketsToPersist.length && activeUser.id) {
+      bucketsToPersist.forEach(({ dateKey, bucket }) => {
+        void persistDateBucket(activeUser.id, dateKey, bucket).catch(() => {
+          setSyncError('Cannot delete this diary entry in Firestore. Check database rules/permissions.');
+        });
+      });
+    }
   };
 
   const savePreferences = () => {
     const cleanTime = /^([01]\d|2[0-3]):([0-5]\d)$/.test(settingsTime)
       ? settingsTime
       : '20:00';
+
+    if (!activeUser.id) {
+      return;
+    }
+
+    const cleanName = settingsName.trim() || 'Friend';
+    const cleanBio = settingsBio.trim().slice(0, 240);
+    const cleanAvatar = settingsAvatarUrl.trim();
+    const cleanNotification = Boolean(settingsNotificationEnabled);
 
     setDb((previous) => {
       const next = clone(previous);
@@ -1282,16 +1594,31 @@ function MainApp({ authUser, onLogout }) {
         return previous;
       }
       const profile = user.profile || buildDefaultProfile();
-      profile.name = settingsName.trim() || 'Friend';
-      profile.bio = settingsBio.trim().slice(0, 240);
-      profile.avatarUrl = settingsAvatarUrl.trim();
+      profile.name = cleanName;
+      profile.bio = cleanBio;
+      profile.avatarUrl = cleanAvatar;
       profile.checkInTime = cleanTime;
-      profile.notificationEnabled = Boolean(settingsNotificationEnabled);
+      profile.notificationEnabled = cleanNotification;
       const fallbackEmail = String(profile.email || authUser.email || '');
       profile.email = fallbackEmail;
       profile.emailLower = fallbackEmail.toLowerCase();
       user.profile = profile;
       return next;
+    });
+
+    const fallbackEmail = String(activeProfile.email || authUser.email || '');
+    const emailLower = fallbackEmail.toLowerCase();
+
+    void updateDoc(getUserDocumentRef(activeUser.id), {
+      name: cleanName,
+      bio: cleanBio,
+      avatarUrl: cleanAvatar,
+      checkInTime: cleanTime,
+      notificationEnabled: cleanNotification,
+      email: fallbackEmail,
+      emailLower,
+    }).catch(() => {
+      setSyncError('Cannot save your preferences. Check Firestore rules/permissions.');
     });
   };
 
@@ -1314,7 +1641,7 @@ function MainApp({ authUser, onLogout }) {
     if (trimmed.includes('@')) {
       const lookupQuery = query(
         collection(firestoreDb, 'users'),
-        where('profile.emailLower', '==', trimmed.toLowerCase()),
+        where('emailLower', '==', trimmed.toLowerCase()),
         limit(1)
       );
       const snapshot = await getDocs(lookupQuery);
@@ -1328,7 +1655,7 @@ function MainApp({ authUser, onLogout }) {
       };
     }
 
-    const snapshot = await getDoc(doc(firestoreDb, 'users', trimmed));
+    const snapshot = await getDoc(getUserDocumentRef(trimmed));
     if (!snapshot.exists()) {
       return null;
     }
@@ -1377,11 +1704,11 @@ function MainApp({ authUser, onLogout }) {
         return;
       }
 
-      await updateDoc(doc(firestoreDb, 'users', activeUser.id), {
-        'profile.friendRequestsOutgoing': arrayUnion(targetId),
+      await updateDoc(getUserDocumentRef(activeUser.id), {
+        friendRequestsOutgoing: arrayUnion(targetId),
       });
-      await updateDoc(doc(firestoreDb, 'users', targetId), {
-        'profile.friendRequestsIncoming': arrayUnion(activeUser.id),
+      await updateDoc(getUserDocumentRef(targetId), {
+        friendRequestsIncoming: arrayUnion(activeUser.id),
       });
 
       setFriendIdentifier('');
@@ -1399,14 +1726,14 @@ function MainApp({ authUser, onLogout }) {
     setFriendError('');
     setFriendMessage('');
     try {
-      await updateDoc(doc(firestoreDb, 'users', activeUser.id), {
-        'profile.friendRequestsIncoming': arrayRemove(requesterId),
-        'profile.friends': arrayUnion(requesterId),
+      await updateDoc(getUserDocumentRef(activeUser.id), {
+        friendRequestsIncoming: arrayRemove(requesterId),
+        friends: arrayUnion(requesterId),
       });
 
-      await updateDoc(doc(firestoreDb, 'users', requesterId), {
-        'profile.friendRequestsOutgoing': arrayRemove(activeUser.id),
-        'profile.friends': arrayUnion(activeUser.id),
+      await updateDoc(getUserDocumentRef(requesterId), {
+        friendRequestsOutgoing: arrayRemove(activeUser.id),
+        friends: arrayUnion(activeUser.id),
       });
 
       setFriendMessage('Friend request accepted.');
@@ -1423,11 +1750,11 @@ function MainApp({ authUser, onLogout }) {
     setFriendError('');
     setFriendMessage('');
     try {
-      await updateDoc(doc(firestoreDb, 'users', activeUser.id), {
-        'profile.friendRequestsIncoming': arrayRemove(requesterId),
+      await updateDoc(getUserDocumentRef(activeUser.id), {
+        friendRequestsIncoming: arrayRemove(requesterId),
       });
-      await updateDoc(doc(firestoreDb, 'users', requesterId), {
-        'profile.friendRequestsOutgoing': arrayRemove(activeUser.id),
+      await updateDoc(getUserDocumentRef(requesterId), {
+        friendRequestsOutgoing: arrayRemove(activeUser.id),
       });
       setFriendMessage('Friend request declined.');
     } catch {
@@ -1448,11 +1775,11 @@ function MainApp({ authUser, onLogout }) {
     setFriendError('');
     setFriendMessage('');
     try {
-      await updateDoc(doc(firestoreDb, 'users', activeUser.id), {
-        'profile.friends': arrayRemove(friendId),
+      await updateDoc(getUserDocumentRef(activeUser.id), {
+        friends: arrayRemove(friendId),
       });
-      await updateDoc(doc(firestoreDb, 'users', friendId), {
-        'profile.friends': arrayRemove(activeUser.id),
+      await updateDoc(getUserDocumentRef(friendId), {
+        friends: arrayRemove(activeUser.id),
       });
       setFriendMessage('Friend removed.');
     } catch {
@@ -1672,9 +1999,16 @@ function MainApp({ authUser, onLogout }) {
   };
 
   const toggleHideWallPost = (postId) => {
-    if (!postId) {
+    if (!postId || !activeUser.id) {
       return;
     }
+
+    const currentHidden = Array.isArray(activeProfile.hiddenPostIds)
+      ? activeProfile.hiddenPostIds
+      : [];
+    const nextHiddenIds = currentHidden.includes(postId)
+      ? currentHidden.filter((id) => id !== postId)
+      : uniqueStrings([...currentHidden, postId]);
 
     setDb((previous) => {
       const next = clone(previous);
@@ -1683,14 +2017,15 @@ function MainApp({ authUser, onLogout }) {
         return previous;
       }
       const profile = user.profile || buildDefaultProfile();
-      const hiddenIds = Array.isArray(profile.hiddenPostIds) ? profile.hiddenPostIds : [];
-      if (hiddenIds.includes(postId)) {
-        profile.hiddenPostIds = hiddenIds.filter((id) => id !== postId);
-      } else {
-        profile.hiddenPostIds = uniqueStrings([...hiddenIds, postId]);
-      }
+      profile.hiddenPostIds = nextHiddenIds;
       user.profile = profile;
       return next;
+    });
+
+    void updateDoc(getUserDocumentRef(activeUser.id), {
+      hiddenPostIds: nextHiddenIds,
+    }).catch(() => {
+      setSyncError('Cannot update your hidden post list. Check Firestore rules/permissions.');
     });
   };
 

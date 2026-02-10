@@ -1,11 +1,9 @@
 function SettingsPage({
-  settingsUserId,
-  setSettingsUserId,
+  activeUserId,
   settingsName,
   setSettingsName,
   settingsTime,
   setSettingsTime,
-  switchUser,
   savePreferences,
 }) {
   return (
@@ -19,15 +17,9 @@ function SettingsPage({
 
       <div className="form-grid">
         <label>
-          User ID
-          <input
-            type="text"
-            value={settingsUserId}
-            onChange={(event) => setSettingsUserId(event.target.value)}
-            placeholder="e.g. user-001"
-          />
+          User ID (Firebase UID)
+          <input type="text" value={activeUserId} readOnly />
         </label>
-        <button onClick={switchUser}>Switch / Create User</button>
 
         <label>
           Display name
@@ -57,7 +49,7 @@ function SettingsPage({
           <li>Time-sensitive reminder asks about your day at configured time.</li>
           <li>AI prompts user to end conversation for each day.</li>
           <li>Dashboard is populated by chat-log analysis.</li>
-          <li>Local database structure: userID to date to conversation + mood.</li>
+          <li>Cloud sync with Firebase Auth and Firestore per user.</li>
         </ul>
       </div>
     </section>

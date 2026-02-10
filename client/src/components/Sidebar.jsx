@@ -1,11 +1,11 @@
 const TABS = ['chat', 'diary', 'community', 'dashboard', 'settings'];
 
-function Sidebar({ activeUser, reminderText, tab, setTab }) {
+function Sidebar({ activeUser, reminderText, tab, setTab, onLogout }) {
   return (
     <aside className="left-panel">
       <h1 className="brand">DayPulse AI</h1>
       <p className="brand-sub">
-        Personal check-in chatbot UI with local database, analytics dashboard, and time-based prompts.
+        Personal check-in chatbot with Firebase sync, analytics dashboard, and time-based prompts.
       </p>
 
       <div className="user-card">
@@ -26,6 +26,8 @@ function Sidebar({ activeUser, reminderText, tab, setTab }) {
           </button>
         ))}
       </nav>
+
+      <button className="logout-btn" onClick={onLogout}>Logout</button>
     </aside>
   );
 }

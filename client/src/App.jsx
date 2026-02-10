@@ -1,4 +1,15 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { onAuthStateChanged, signOut } from 'firebase/auth';
+import {
+  collection,
+  doc,
+  getDoc,
+  onSnapshot,
+  orderBy,
+  query,
+  setDoc,
+  updateDoc,
+} from 'firebase/firestore';
 import './App.css';
 import Sidebar from './components/Sidebar.jsx';
 import ChatPage from './pages/ChatPage.jsx';
@@ -6,6 +17,9 @@ import DiaryPage from './pages/DiaryPage.jsx';
 import CommunityWallPage from './pages/CommunityWallPage.jsx';
 import DashboardPage from './pages/DashboardPage.jsx';
 import SettingsPage from './pages/SettingsPage.jsx';
+import AuthPage from './pages/AuthPage.jsx';
+import LandingPage from './pages/LandingPage.jsx';
+import { auth, db as firestoreDb } from './lib/firebase.js';
 import {
   analyzeConversations,
   buildAiReply,
@@ -19,12 +33,9 @@ import {
   getReminderText,
   isCheckInWindowOpen,
   isValidDateKey,
-  loadDb,
   MOOD_META,
   randomId,
   REMINDER_POLL_MS,
-  sanitizeUserId,
-  saveDb,
   scoreMood,
   sortDiaryEntries,
   toIsoDate,
@@ -155,8 +166,13 @@ function normalizeWallPosts(rawPosts) {
     .sort((first, second) => String(second.createdAt).localeCompare(String(first.createdAt)));
 }
 
-function App() {
-  const [db, setDb] = useState(loadDb);
+function MainApp({ authUser, onLogout }) {
+  const [db, setDb] = useState({
+    activeUserId: authUser?.uid || '',
+    users: {},
+    wallPosts: [],
+  });
+  const remoteUserHashRef = useRef('');
   const [tab, setTab] = useState('chat');
   const [chatDate, setChatDate] = useState(toIsoDate());
   const [draft, setDraft] = useState('');
@@ -174,11 +190,117 @@ function App() {
   const [wallPhotos, setWallPhotos] = useState([]);
   const [wallPhotoError, setWallPhotoError] = useState('');
   const [wallCommentDrafts, setWallCommentDrafts] = useState({});
-  const [settingsUserId, setSettingsUserId] = useState('');
   const [settingsName, setSettingsName] = useState('');
   const [settingsTime, setSettingsTime] = useState('20:00');
+  const [syncError, setSyncError] = useState('');
 
-  const activeUser = db.users[db.activeUserId] || buildDefaultUser(db.activeUserId);
+  useEffect(() => {
+    const authId = String(authUser?.uid || '').trim();
+    if (!authId) {
+      return;
+    }
+    setSyncError('');
+
+    setDb((previous) => {
+      if (previous.users[authId]) {
+        return {
+          ...previous,
+          activeUserId: authId,
+        };
+      }
+      const starterUser = buildDefaultUser(authId);
+      starterUser.name = String(authUser.displayName || authUser.email || 'Friend');
+      return {
+        ...previous,
+        activeUserId: authId,
+        users: {
+          ...previous.users,
+          [authId]: starterUser,
+        },
+      };
+    });
+
+    const userRef = doc(firestoreDb, 'users', authId);
+    const wallPostsQuery = query(
+      collection(firestoreDb, 'wallPosts'),
+      orderBy('createdAtMs', 'desc')
+    );
+
+    const unsubscribeUser = onSnapshot(userRef, async (snapshot) => {
+      if (!snapshot.exists()) {
+        const initialUser = buildDefaultUser(authId);
+        initialUser.name = String(authUser.displayName || authUser.email || 'Friend');
+        try {
+          await setDoc(userRef, initialUser);
+        } catch {
+          setSyncError(
+            'Cannot create your Firestore user profile. Check Firestore database and security rules.'
+          );
+        }
+        remoteUserHashRef.current = JSON.stringify(initialUser);
+        setDb((previous) => ({
+          ...previous,
+          activeUserId: authId,
+          users: {
+            ...previous.users,
+            [authId]: initialUser,
+          },
+        }));
+        return;
+      }
+
+      const data = snapshot.data() || {};
+      const normalizedUser = {
+        ...buildDefaultUser(authId),
+        ...data,
+        id: authId,
+        name: String(data.name || authUser.displayName || authUser.email || 'Friend'),
+        conversations: data.conversations || {},
+        diaryEntries: Array.isArray(data.diaryEntries) ? data.diaryEntries : [],
+      };
+
+      remoteUserHashRef.current = JSON.stringify(normalizedUser);
+      setDb((previous) => ({
+        ...previous,
+        activeUserId: authId,
+        users: {
+          ...previous.users,
+          [authId]: normalizedUser,
+        },
+      }));
+    }, () => {
+      setSyncError('Cannot read user data from Firestore. Check database rules/permissions.');
+    });
+
+    const unsubscribeWall = onSnapshot(
+      wallPostsQuery,
+      (snapshot) => {
+        const posts = snapshot.docs.map((postDoc) => ({
+          id: postDoc.id,
+          ...postDoc.data(),
+        }));
+
+        setDb((previous) => ({
+          ...previous,
+          wallPosts: posts,
+        }));
+      },
+      () => {
+        setSyncError('Cannot read community wall from Firestore. Check database rules/permissions.');
+      }
+    );
+
+    return () => {
+      unsubscribeUser();
+      unsubscribeWall();
+    };
+  }, [authUser?.uid, authUser?.displayName, authUser?.email]);
+
+  const hasActiveUser = Boolean(db.activeUserId && db.users[db.activeUserId]);
+  const activeUser = hasActiveUser
+    ? db.users[db.activeUserId]
+    : buildDefaultUser(db.activeUserId || String(authUser?.uid || ''));
+
   const conversation = getOrCreateConversation(activeUser, chatDate);
   const todayConversation = getOrCreateConversation(activeUser, toIsoDate());
   const reminderText = getReminderText(activeUser, todayConversation);
@@ -201,7 +323,7 @@ function App() {
     { total: 0, goodCount: 0, badCount: 0, photoCount: 0 }
   );
 
-  const query = diaryQuery.trim().toLowerCase();
+  const diarySearchQuery = diaryQuery.trim().toLowerCase();
   const filteredDiaryEntries = diaryEntries.filter((entry) => {
     if (diaryFilterType !== 'all' && entry.type !== diaryFilterType) {
       return false;
@@ -211,27 +333,50 @@ function App() {
       return false;
     }
 
-    if (!query) {
+    if (!diarySearchQuery) {
       return true;
     }
 
-    return `${entry.title} ${entry.details}`.toLowerCase().includes(query);
+    return `${entry.title} ${entry.details}`.toLowerCase().includes(diarySearchQuery);
   });
 
   useEffect(() => {
-    saveDb(db);
-  }, [db]);
+    const activeUserId = db.activeUserId;
+    if (!activeUserId) {
+      return;
+    }
+
+    const user = db.users[activeUserId];
+    if (!user) {
+      return;
+    }
+
+    const localHash = JSON.stringify(user);
+    if (localHash === remoteUserHashRef.current) {
+      return;
+    }
+
+    remoteUserHashRef.current = localHash;
+    void setDoc(doc(firestoreDb, 'users', activeUserId), user).catch(() => {
+      setSyncError('Cannot sync your updates to Firestore. Check database rules/permissions.');
+    });
+  }, [db.activeUserId, db.users]);
 
   useEffect(() => {
-    setSettingsUserId(activeUser.id);
+    if (!hasActiveUser) {
+      return;
+    }
     setSettingsName(activeUser.name);
     setSettingsTime(activeUser.checkInTime);
-  }, [activeUser.id, activeUser.name, activeUser.checkInTime]);
+  }, [hasActiveUser, activeUser.name, activeUser.checkInTime]);
 
   useEffect(() => {
     setDb((previous) => {
       const next = clone(previous);
       const user = next.users[next.activeUserId];
+      if (!user) {
+        return previous;
+      }
       if (!user.conversations[chatDate]) {
         user.conversations[chatDate] = buildEmptyConversation(chatDate);
         return next;
@@ -245,6 +390,9 @@ function App() {
       setDb((previous) => {
         const next = clone(previous);
         const user = next.users[next.activeUserId];
+        if (!user) {
+          return previous;
+        }
         const today = toIsoDate();
 
         if (!user.conversations[today]) {
@@ -289,6 +437,9 @@ function App() {
     setDb((previous) => {
       const next = clone(previous);
       const user = next.users[next.activeUserId];
+      if (!user) {
+        return previous;
+      }
       if (!user.conversations[chatDate]) {
         user.conversations[chatDate] = buildEmptyConversation(chatDate);
       }
@@ -337,6 +488,9 @@ function App() {
     setDb((previous) => {
       const next = clone(previous);
       const user = next.users[next.activeUserId];
+      if (!user) {
+        return previous;
+      }
       if (!user.conversations[chatDate]) {
         user.conversations[chatDate] = buildEmptyConversation(chatDate);
       }
@@ -430,6 +584,9 @@ function App() {
     setDb((previous) => {
       const next = clone(previous);
       const user = next.users[next.activeUserId];
+      if (!user) {
+        return previous;
+      }
       const existingEntries = Array.isArray(user.diaryEntries) ? user.diaryEntries : [];
       user.diaryEntries = sortDiaryEntries([entry, ...existingEntries]);
       return next;
@@ -460,40 +617,13 @@ function App() {
     setDb((previous) => {
       const next = clone(previous);
       const user = next.users[next.activeUserId];
+      if (!user) {
+        return previous;
+      }
       const existingEntries = Array.isArray(user.diaryEntries) ? user.diaryEntries : [];
       user.diaryEntries = existingEntries.filter((entry) => String(entry?.id) !== String(entryId));
       return next;
     });
-  };
-
-  const switchUser = () => {
-    const targetUserId = sanitizeUserId(settingsUserId);
-    if (!targetUserId) {
-      return;
-    }
-
-    setDb((previous) => {
-      const next = clone(previous);
-      if (!next.users[targetUserId]) {
-        next.users[targetUserId] = buildDefaultUser(targetUserId);
-      }
-      next.activeUserId = targetUserId;
-      return next;
-    });
-
-    setChatDate(toIsoDate());
-    setDraft('');
-    setDiaryDate(toIsoDate());
-    setDiaryType('good');
-    setDiaryTitle('');
-    setDiaryDetails('');
-    setDiaryPhotos([]);
-    setDiaryPhotoError('');
-    setWallDraft('');
-    setWallAnonymous(false);
-    setWallPhotos([]);
-    setWallPhotoError('');
-    clearDiaryFilters();
   };
 
   const savePreferences = () => {
@@ -504,6 +634,9 @@ function App() {
     setDb((previous) => {
       const next = clone(previous);
       const user = next.users[next.activeUserId];
+      if (!user) {
+        return previous;
+      }
       user.name = settingsName.trim() || 'Friend';
       user.checkInTime = cleanTime;
       return next;
@@ -560,18 +693,21 @@ function App() {
     setWallPhotos((previous) => previous.filter((photo) => photo.id !== photoId));
   };
 
-  const createWallPost = () => {
+  const createWallPost = async () => {
     const text = wallDraft.trim();
     if (!text && wallPhotos.length === 0) {
       return;
     }
 
+    const postRef = doc(collection(firestoreDb, 'wallPosts'));
+    const nowIso = new Date().toISOString();
     const post = {
-      id: randomId(),
       text,
       authorName: activeUser.name,
       anonymous: wallAnonymous,
-      createdAt: new Date().toISOString(),
+      authorId: activeUser.id,
+      createdAt: nowIso,
+      createdAtMs: Date.now(),
       photos: wallPhotos.map((photo) => ({
         id: photo.id,
         name: photo.name,
@@ -585,12 +721,7 @@ function App() {
       comments: [],
     };
 
-    setDb((previous) => {
-      const next = clone(previous);
-      const existingPosts = Array.isArray(next.wallPosts) ? next.wallPosts : [];
-      next.wallPosts = [post, ...existingPosts];
-      return next;
-    });
+    await setDoc(postRef, post);
 
     setWallDraft('');
     setWallAnonymous(false);
@@ -598,37 +729,32 @@ function App() {
     setWallPhotoError('');
   };
 
-  const toggleWallReaction = (postId, reactionKey) => {
+  const toggleWallReaction = async (postId, reactionKey) => {
     if (!postId || !['support', 'celebrate', 'care'].includes(reactionKey)) {
       return;
     }
 
-    setDb((previous) => {
-      const next = clone(previous);
-      const existingPosts = Array.isArray(next.wallPosts) ? next.wallPosts : [];
-      next.wallPosts = existingPosts.map((post) => {
-        if (String(post?.id) !== String(postId)) {
-          return post;
-        }
+    const postRef = doc(firestoreDb, 'wallPosts', String(postId));
+    const snapshot = await getDoc(postRef);
+    if (!snapshot.exists()) {
+      return;
+    }
 
-        const reactions = post.reactions || {};
-        const users = Array.isArray(reactions[reactionKey]) ? reactions[reactionKey].map(String) : [];
-        const currentUserId = String(next.activeUserId);
-        const hasReacted = users.includes(currentUserId);
+    const post = snapshot.data() || {};
+    const reactions = post.reactions || {};
+    const users = Array.isArray(reactions[reactionKey]) ? reactions[reactionKey].map(String) : [];
+    const currentUserId = String(activeUser.id);
+    const hasReacted = users.includes(currentUserId);
 
-        return {
-          ...post,
-          reactions: {
-            support: Array.isArray(reactions.support) ? reactions.support.map(String) : [],
-            celebrate: Array.isArray(reactions.celebrate) ? reactions.celebrate.map(String) : [],
-            care: Array.isArray(reactions.care) ? reactions.care.map(String) : [],
-            [reactionKey]: hasReacted
-              ? users.filter((userId) => userId !== currentUserId)
-              : [...users, currentUserId],
-          },
-        };
-      });
-      return next;
+    await updateDoc(postRef, {
+      reactions: {
+        support: Array.isArray(reactions.support) ? reactions.support.map(String) : [],
+        celebrate: Array.isArray(reactions.celebrate) ? reactions.celebrate.map(String) : [],
+        care: Array.isArray(reactions.care) ? reactions.care.map(String) : [],
+        [reactionKey]: hasReacted
+          ? users.filter((userId) => userId !== currentUserId)
+          : [...users, currentUserId],
+      },
     });
   };
 
@@ -639,7 +765,7 @@ function App() {
     }));
   };
 
-  const addWallComment = (postId) => {
+  const addWallComment = async (postId) => {
     const text = String(wallCommentDrafts[postId] || '').trim();
     if (!postId || !text) {
       return;
@@ -652,21 +778,17 @@ function App() {
       createdAt: new Date().toISOString(),
     };
 
-    setDb((previous) => {
-      const next = clone(previous);
-      const existingPosts = Array.isArray(next.wallPosts) ? next.wallPosts : [];
-      next.wallPosts = existingPosts.map((post) => {
-        if (String(post?.id) !== String(postId)) {
-          return post;
-        }
+    const postRef = doc(firestoreDb, 'wallPosts', String(postId));
+    const snapshot = await getDoc(postRef);
+    if (!snapshot.exists()) {
+      return;
+    }
 
-        const existingComments = Array.isArray(post.comments) ? post.comments : [];
-        return {
-          ...post,
-          comments: [...existingComments, comment],
-        };
-      });
-      return next;
+    const post = snapshot.data() || {};
+    const existingComments = Array.isArray(post.comments) ? post.comments : [];
+
+    await updateDoc(postRef, {
+      comments: [...existingComments, comment],
     });
 
     setWallCommentDrafts((previous) => {
@@ -676,11 +798,30 @@ function App() {
     });
   };
 
+  if (!hasActiveUser) {
+    return (
+      <div className="auth-loading">
+        <p>Syncing your data...</p>
+      </div>
+    );
+  }
+
   return (
     <div className="app-shell">
-      <Sidebar activeUser={activeUser} reminderText={reminderText} tab={tab} setTab={setTab} />
+      <Sidebar
+        activeUser={activeUser}
+        reminderText={reminderText}
+        tab={tab}
+        setTab={setTab}
+        onLogout={onLogout}
+      />
 
       <main className="main-panel">
+        {syncError && (
+          <section className="panel">
+            <p className="error-text">{syncError}</p>
+          </section>
+        )}
         {tab === 'chat' && (
           <ChatPage
             activeUser={activeUser}
@@ -762,19 +903,72 @@ function App() {
 
         {tab === 'settings' && (
           <SettingsPage
-            settingsUserId={settingsUserId}
-            setSettingsUserId={setSettingsUserId}
+            activeUserId={activeUser.id}
             settingsName={settingsName}
             setSettingsName={setSettingsName}
             settingsTime={settingsTime}
             setSettingsTime={setSettingsTime}
-            switchUser={switchUser}
             savePreferences={savePreferences}
           />
         )}
       </main>
     </div>
   );
+}
+
+function App() {
+  const [authUser, setAuthUser] = useState(null);
+  const [authReady, setAuthReady] = useState(false);
+  const [publicView, setPublicView] = useState('home');
+
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, (user) => {
+      setAuthUser(user);
+      setAuthReady(true);
+    });
+    return () => unsubscribe();
+  }, []);
+
+  const handleLogout = async () => {
+    await signOut(auth);
+  };
+
+  if (!authReady) {
+    return (
+      <div className="auth-loading">
+        <p>Loading...</p>
+      </div>
+    );
+  }
+
+  if (!authUser) {
+    if (publicView === 'auth') {
+      return (
+        <AuthPage
+          initialMode="login"
+          onBack={() => setPublicView('home')}
+        />
+      );
+    }
+
+    if (publicView === 'register') {
+      return (
+        <AuthPage
+          initialMode="register"
+          onBack={() => setPublicView('home')}
+        />
+      );
+    }
+
+    return (
+      <LandingPage
+        onLogin={() => setPublicView('auth')}
+        onRegister={() => setPublicView('register')}
+      />
+    );
+  }
+
+  return <MainApp authUser={authUser} onLogout={handleLogout} />;
 }
 
 export default App;

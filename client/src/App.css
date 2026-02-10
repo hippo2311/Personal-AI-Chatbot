@@ -176,7 +176,7 @@ textarea:focus {
   height: 78px;
   border-bottom: 1px solid #d6e3e8;
   display: grid;
-  grid-template-columns: 1fr auto 1fr;
+  grid-template-columns: 1fr auto;
   align-items: center;
   padding: 0 1.5rem;
   background: rgba(255, 255, 255, 0.8);
@@ -199,25 +199,6 @@ textarea:focus {
   font-size: 1.75rem;
   color: #13212b;
   font-family: 'Fraunces', serif;
-}
-
-.landing-nav {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.55rem;
-  justify-self: center;
-}
-
-.landing-nav-item {
-  padding: 0.5rem 0.9rem;
-  border-radius: 10px;
-  color: #506170;
-  font-weight: 600;
-}
-
-.landing-nav-item.active {
-  background: #d9f1dc;
-  color: #1f8244;
 }
 
 .landing-login-pill {
@@ -550,7 +531,7 @@ button:active {
 
 .diary-kpi-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(120px, 1fr));
+  grid-template-columns: repeat(5, minmax(120px, 1fr));
   gap: 0.65rem;
 }
 
@@ -1120,6 +1101,125 @@ button:active {
   color: #3d4d58;
 }
 
+.success-text {
+  margin: 0.45rem 0;
+  color: #1e7048;
+}
+
+.settings-checkbox-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55rem;
+  color: #304a59;
+  font-weight: 600;
+}
+
+.friend-add-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 0.55rem;
+  margin-bottom: 0.55rem;
+}
+
+.friend-list {
+  display: grid;
+  gap: 0.55rem;
+}
+
+.friend-item {
+  border: 1px solid #d5e4ea;
+  border-radius: 12px;
+  padding: 0.65rem;
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 0.6rem;
+  background: #fbfffe;
+}
+
+.friend-item p {
+  margin: 0.2rem 0 0;
+  color: #47606e;
+}
+
+.friend-actions {
+  display: inline-flex;
+  gap: 0.35rem;
+}
+
+.friend-pill {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  border: 1px solid #c3d8e6;
+  background: #edf6ff;
+  color: #2f5e7a;
+  padding: 0.15rem 0.55rem;
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.challenge-card p {
+  margin: 0.35rem 0 0.75rem;
+}
+
+.wall-compose-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 0.6rem;
+}
+
+.wall-filter-card {
+  margin-top: 0.7rem;
+}
+
+.wall-filter-grid {
+  display: grid;
+  gap: 0.6rem;
+}
+
+.wall-post-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.wall-avatar {
+  overflow: hidden;
+}
+
+.wall-avatar-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.wall-author-bio {
+  margin-top: 0.15rem;
+  font-size: 0.82rem;
+}
+
+.wall-tags-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.wall-tag-chip {
+  background: #edf6ff;
+  color: #24566f;
+  border-color: #bfd7e8;
+  min-height: 30px;
+  padding: 0.2rem 0.55rem;
+}
+
+.friend-row-inline {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.45rem;
+}
+
 .tiny-mood {
   margin-top: 0.5rem;
   display: inline-flex;
@@ -1152,12 +1252,7 @@ button:active {
 
 @media (max-width: 1100px) {
   .landing-topbar {
-    grid-template-columns: 1fr auto;
     gap: 0.6rem;
-  }
-
-  .landing-nav {
-    display: none;
   }
 
   .app-shell {
@@ -1228,6 +1323,10 @@ button:active {
   }
 
   .wall-comment-compose {
+    grid-template-columns: 1fr;
+  }
+
+  .friend-add-row {
     grid-template-columns: 1fr;
   }
 

@@ -51,7 +51,17 @@ export function buildDefaultUser(id = 'user-001') {
   return {
     id,
     name: 'Friend',
+    email: '',
+    emailLower: '',
+    bio: '',
+    avatarUrl: '',
     checkInTime: '20:00',
+    notificationEnabled: false,
+    completedChallenges: [],
+    friends: [],
+    friendRequestsIncoming: [],
+    friendRequestsOutgoing: [],
+    hiddenPostIds: [],
     conversations: {},
     diaryEntries: [],
   };

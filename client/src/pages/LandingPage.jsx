@@ -7,12 +7,6 @@ function LandingPage({ onLogin, onRegister }) {
           <strong>DayPulse</strong>
         </div>
 
-        <nav className="landing-nav">
-          <span className="landing-nav-item active">Home</span>
-          <span className="landing-nav-item">Community</span>
-          <span className="landing-nav-item">Dashboard</span>
-        </nav>
-
         <button className="landing-login-pill" onClick={onLogin}>
           Login
         </button>

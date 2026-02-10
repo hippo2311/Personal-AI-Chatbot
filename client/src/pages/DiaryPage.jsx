@@ -34,6 +34,10 @@ function buildCalendarCells(viewMonth, photosByDate) {
 
 function DiaryPage({
   diaryStats,
+  diaryStreakDays,
+  dailyChallenge,
+  challengeCompleted,
+  completeDailyChallenge,
   diaryDate,
   setDiaryDate,
   diaryType,
@@ -98,11 +102,12 @@ function DiaryPage({
   );
 
   const openPhotoViewer = (photo, fallbackDate) => {
-    if (!photo?.dataUrl) {
+    const src = photo?.src || photo?.url || photo?.dataUrl || photo?.previewUrl || '';
+    if (!src) {
       return;
     }
     setSelectedPhoto({
-      dataUrl: photo.dataUrl,
+      src,
       name: photo.name || 'Photo',
       entryTitle: photo.entryTitle || '',
       date: fallbackDate || photo.date || '',
@@ -139,6 +144,18 @@ function DiaryPage({
           <p>Uploaded photos</p>
           <h3>{diaryStats.photoCount}</h3>
         </div>
+        <div className="kpi-card">
+          <p>Diary streak</p>
+          <h3>{diaryStreakDays} day(s)</h3>
+        </div>
+      </div>
+
+      <div className="card challenge-card">
+        <h3>Daily Challenge</h3>
+        <p>{dailyChallenge}</p>
+        <button onClick={completeDailyChallenge} disabled={challengeCompleted}>
+          {challengeCompleted ? 'Completed today' : 'Mark as complete'}
+        </button>
       </div>
 
       <div className="split-grid diary-split">
@@ -194,7 +211,7 @@ function DiaryPage({
             <div className="selected-photo-list">
               {diaryPhotos.map((photo) => (
                 <article key={photo.id} className="selected-photo-item">
-                  <img src={photo.dataUrl} alt={photo.name} />
+                  <img src={photo.previewUrl || photo.src || photo.url || photo.dataUrl} alt={photo.name} />
                   <button
                     className="delete-btn"
                     onClick={() => removeSelectedDiaryPhoto(photo.id)}
@@ -309,7 +326,7 @@ function DiaryPage({
                         className="photo-thumb-btn"
                         onClick={() => openPhotoViewer(photo, cell.dateKey)}
                       >
-                        <img src={photo.dataUrl} alt={photo.entryTitle || photo.name} />
+                        <img src={photo.src || photo.url || photo.dataUrl} alt={photo.entryTitle || photo.name} />
                       </button>
                     ))}
                     {overflowCount > 0 && (
@@ -372,7 +389,7 @@ function DiaryPage({
                         )
                       }
                     >
-                      <img src={photo.dataUrl} alt={photo.name || entry.title} />
+                      <img src={photo.src || photo.url || photo.dataUrl} alt={photo.name || entry.title} />
                     </button>
                   ))}
                 </div>
@@ -392,7 +409,7 @@ function DiaryPage({
             <button className="photo-viewer-close" onClick={closePhotoViewer}>
               Close
             </button>
-            <img src={selectedPhoto.dataUrl} alt={selectedPhoto.name || selectedPhoto.entryTitle} />
+            <img src={selectedPhoto.src} alt={selectedPhoto.name || selectedPhoto.entryTitle} />
             <p>
               {selectedPhoto.entryTitle || selectedPhoto.name}
               {selectedPhoto.date ? ` • ${formatDate(selectedPhoto.date)}` : ''}

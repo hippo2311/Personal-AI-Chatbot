@@ -71,7 +71,6 @@ export function buildDefaultUser(id = 'user-001') {
     profile: buildDefaultProfile(),
     conversations: {},
     dates: {},
-    conversationSequences: {},
   };
 }
 
@@ -123,13 +122,6 @@ export function buildDefaultDateBucket(overrides = {}) {
       ended: false,
       insights: [],
       reminderTriggered: false,
-      ratingOfDay: '',
-      activitiesDone: [],
-      sleepQuality: 'medium',
-      productivity: 'medium',
-      friendInteraction: 'none',
-      familyInteraction: 'none',
-      issuesFaced: '',
     },
     diaries: [],
   };
@@ -173,12 +165,9 @@ export function sortDiaryEntries(entries) {
   });
 }
 
-export function buildEmptyConversation(date, overrides = {}) {
+export function buildEmptyConversation(date) {
   return {
     date,
-    startDate: date,
-    conversationId: null,
-    sequenceNumber: 0,
     moodLabel: 'neutral',
     moodScore: 0,
     ended: false,
@@ -186,7 +175,6 @@ export function buildEmptyConversation(date, overrides = {}) {
     startedAt: new Date().toISOString(),
     endedAt: null,
     messages: [],
-    ...overrides,
   };
 }
 

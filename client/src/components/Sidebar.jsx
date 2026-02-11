@@ -1,4 +1,4 @@
-const TABS = ['chat', 'diary', 'community', 'dashboard', 'settings'];
+const TABS = ['chat', 'diary', 'graph', 'community', 'dashboard', 'settings'];
 
 function Sidebar({ activeUser, reminderText, tab, setTab, onLogout }) {
   const profile = activeUser?.profile || {};

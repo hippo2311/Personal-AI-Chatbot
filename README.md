@@ -9,15 +9,45 @@ This document explains how to set up both apps locally, manage environment varia
 
 ---
 
+## Problem Statement
+Communities are becoming more digital and urban, leaving people with fewer meaningful connections, fragmented support networks, and barriers to consistent emotional care. These gaps reduce social cohesion and make it harder to access timely support.
+
+## Inspiration
+The challenge brief calls for tools that strengthen community bonds, support relaxation and mental wellbeing, and explore community-centered problem spaces. DayPulse answers this by pairing AI-guided check-ins with community-driven sharing to turn passive apps into active companions.
+
+## Real-World Challenges We Target
+- Reduced social interaction and isolation in dense, digital-first environments
+- Fragmented or inaccessible support networks, especially for stressed or marginalized groups
+- Difficulty maintaining healthy routines like journaling, reflection, and check-ins
+- Lack of trusted, inclusive spaces to share gratitude or struggles with peers
+- Limited feedback loops that turn feelings into actionable wellbeing insights
+
+## How DayPulse Helps (Feature → Impact)
+- **AI Daily Chat**: Proactive mood-aware chats reduce isolation by simulating supportive check-ins and routing users to the right tools or prompts.
+- **Diary + Media Vault**: Structured journaling with photos lowers the friction to reflect, creating a personal record that surfaces patterns over time.
+- **Life Graph / Analytics**: Mood trends, streaks, and community stats transform raw feelings into signals users can act on to improve wellbeing.
+- **Community Wall**: A gratitude-first social feed where reactions and comments foster safe, inclusive peer connection.
+- **Settings & Social Layer**: Reminders, friend connections, and notification controls keep engagement personal and respectful.
+
+## Streaks and Engagement Design
+Diary streaks and check-in streaks intentionally reward consistency—letting users “beat their friends’ streaks” and nudging repeat visits like a social app, but for sustained mental health habits. This makes returning feel fun while building durable wellbeing routines.
+
+---
+
 ## Table of Contents
-1. [Features](#features)
-2. [Architecture](#architecture)
-3. [Prerequisites](#prerequisites)
-4. [Environment Configuration](#environment-configuration)
-5. [Installation & Local Development](#installation--local-development)
-6. [Useful Commands](#useful-commands)
-7. [Troubleshooting](#troubleshooting)
-8. [Pitch Narrative Explained](#pitch-narrative-explained)
+1. [Problem Statement](#problem-statement)
+2. [Inspiration](#inspiration)
+3. [Real-World Challenges We Target](#real-world-challenges-we-target)
+4. [How DayPulse Helps (Feature → Impact)](#how-daypulse-helps-feature--impact)
+5. [Streaks and Engagement Design](#streaks-and-engagement-design)
+6. [Features](#features)
+7. [Architecture](#architecture)
+8. [Prerequisites](#prerequisites)
+9. [Environment Configuration](#environment-configuration)
+10. [Installation & Local Development](#installation--local-development)
+11. [Useful Commands](#useful-commands)
+12. [Troubleshooting](#troubleshooting)
+13. [Pitch Narrative Explained](#pitch-narrative-explained)
 
 ---
 

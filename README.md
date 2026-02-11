@@ -10,6 +10,21 @@ This document explains how to set up both apps locally, manage environment varia
 
 ---
 
+## Table of Contents
+1. [Problem Statement](#problem-statement)
+2. [Inspiration](#inspiration)
+3. [Real-World Challenges We Target](#real-world-challenges-we-target)
+4. [How DayPulse Helps (Feature → Impact)](#how-daypulse-helps-feature--impact)
+5. [Streaks and Engagement Design](#streaks-and-engagement-design)
+6. [Features](#features)
+7. [Architecture](#architecture)
+8. [Environment Configuration](#environment-configuration)
+9. [Installation & Local Development](#installation--local-development)
+10. [Useful Commands](#useful-commands)
+11. [Troubleshooting](#troubleshooting)
+
+---
+
 ## Problem Statement
 Communities are becoming more digital and urban, leaving people with fewer meaningful connections, fragmented support networks, and barriers to consistent emotional care. These gaps reduce social cohesion and make it harder to access timely support.
 
@@ -33,24 +48,6 @@ The challenge brief calls for tools that strengthen community bonds, support rel
 ## Streaks and Engagement Design
 Diary streaks and check-in streaks intentionally reward consistency—letting users “beat their friends’ streaks” and nudging repeat visits like a social app, but for sustained mental health habits. This makes returning feel fun while building durable wellbeing routines.
 
----
-
-## Table of Contents
-1. [Problem Statement](#problem-statement)
-2. [Inspiration](#inspiration)
-3. [Real-World Challenges We Target](#real-world-challenges-we-target)
-4. [How DayPulse Helps (Feature → Impact)](#how-daypulse-helps-feature--impact)
-5. [Streaks and Engagement Design](#streaks-and-engagement-design)
-6. [Features](#features)
-7. [Architecture](#architecture)
-8. [Prerequisites](#prerequisites)
-9. [Environment Configuration](#environment-configuration)
-10. [Installation & Local Development](#installation--local-development)
-11. [Useful Commands](#useful-commands)
-12. [Troubleshooting](#troubleshooting)
-13. [Pitch Narrative Explained](#pitch-narrative-explained)
-
----
 
 ## Features
 - **AI Daily Chat** – Mood-aware conversational agent that initiates check-ins, stores transcripts, and keeps mood analytics up to date.
@@ -100,11 +97,11 @@ OPENAI_API_KEY=sk-...
 
 ## Installation & Local Development
 
-Download node.js from https://nodejs.org/en/download
-Download git from https://git-scm.com/install/
-open command prompt and run
-git clone https://github.com/hippo2311/Personal-AI-Chatbot.git
-.env files are sent through email. Please follow the instructions in the email on where to insert the .env files.
+1. Download node.js from https://nodejs.org/en/download
+2. Download git from https://git-scm.com/install/
+3. open command prompt and run
+4. git clone https://github.com/hippo2311/Personal-AI-Chatbot.git
+5. .env files are sent through email. Please follow the instructions in the email on where to insert the .env files.
 
 ### 1. Client (React + Vite)
 ```bash

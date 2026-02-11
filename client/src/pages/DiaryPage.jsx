@@ -209,8 +209,8 @@ function DiaryPage({
 
           {diaryPhotos.length > 0 && (
             <div className="selected-photo-list">
-              {diaryPhotos.map((photo) => (
-                <article key={photo.id} className="selected-photo-item">
+              {diaryPhotos.map((photo, index) => (
+                <article key={`${photo.id}-${index}`} className="selected-photo-item">
                   <img src={photo.previewUrl || photo.src || photo.url || photo.dataUrl} alt={photo.name} />
                   <button
                     className="delete-btn"
@@ -320,9 +320,9 @@ function DiaryPage({
                     <span>{cell.photos.length ? `${cell.photos.length} photo(s)` : ''}</span>
                   </header>
                   <div className="calendar-photo-strip">
-                    {cell.photos.slice(0, 3).map((photo) => (
+                    {cell.photos.slice(0, 3).map((photo, index) => (
                       <button
-                        key={photo.id}
+                        key={`${photo.entryId || photo.id}-${index}`}
                         className="photo-thumb-btn"
                         onClick={() => openPhotoViewer(photo, cell.dateKey)}
                       >
@@ -355,8 +355,8 @@ function DiaryPage({
         )}
 
         <div className="diary-list">
-          {filteredDiaryEntries.map((entry) => (
-            <article key={entry.id} className="diary-item">
+          {filteredDiaryEntries.map((entry, entryIndex) => (
+            <article key={`${entry.id}-${entryIndex}`} className="diary-item">
               <header className="diary-item-header">
                 <div className="diary-item-meta">
                   <span className={`diary-type-chip diary-${entry.type}`}>
@@ -374,9 +374,9 @@ function DiaryPage({
               {entry.details && <p>{entry.details}</p>}
               {Array.isArray(entry.photos) && entry.photos.length > 0 && (
                 <div className="entry-photo-grid">
-                  {entry.photos.map((photo) => (
+                  {entry.photos.map((photo, photoIndex) => (
                     <button
-                      key={photo.id}
+                      key={`${photo.id}-${photoIndex}`}
                       className="photo-thumb-btn"
                       onClick={() =>
                         openPhotoViewer(

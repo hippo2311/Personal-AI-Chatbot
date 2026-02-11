@@ -1,0 +1,11 @@
+# Node dependencies
+node_modules/
+**/node_modules/
+server/node_modules/
+
+# Local data store for the server
+server/data/
+
+# Environment files
+*.env
+/server/node_modules

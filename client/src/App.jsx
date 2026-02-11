@@ -1,5 +1,4 @@
 /* eslint-disable react-hooks/set-state-in-effect */
-import GraphPage from './GraphPage.jsx';
 import { useEffect, useState } from 'react';
 import { onAuthStateChanged, signOut } from 'firebase/auth';
 import {
@@ -1208,7 +1207,7 @@ function MainApp({ authUser, onLogout }) {
     return () => clearInterval(timer);
   }, [db.activeUserId, db.users, activeProfile.checkInTime, activeProfile.name, conversationsLoaded]);
 
-  const sendMessage = async (customText) => {
+  const sendMessage = (customText) => {
     const text = String(customText ?? draft).trim();
     if (!text || conversation.ended || !conversationsLoaded) {
       return;
@@ -1243,6 +1242,22 @@ function MainApp({ authUser, onLogout }) {
       createdAt: new Date().toISOString(),
     });
 
+    const userTurns = draftConversation.messages.filter((message) => message.sender === 'user').length;
+
+    draftConversation.messages.push({
+      id: randomId(),
+      sender: 'assistant',
+      text: buildAiReply({
+        userName: profile.name,
+        userText: text,
+        moodLabel: mood.label,
+        userTurns,
+      }),
+      moodLabel: null,
+      moodScore: null,
+      createdAt: new Date().toISOString(),
+    });
+
     draftConversation.checkInPrompted = true;
     updateConversationMood(draftConversation);
 
@@ -1261,86 +1276,9 @@ function MainApp({ authUser, onLogout }) {
     });
 
     const conversationRef = getConversationDocumentRef(activeUserId, draftConversation.conversationId);
-    const persistConversation = (conversationPayload) =>
-      setDoc(conversationRef, conversationPayload).catch(() => {
-        setSyncError('Cannot save your conversation right now. Check database rules/permissions.');
-      });
-
-    void persistConversation(draftConversation);
-
-    const appendAssistantMessage = (assistantText) => {
-      if (!assistantText) {
-        return;
-      }
-
-      const assistantMessage = {
-        id: randomId(),
-        sender: 'assistant',
-        text: assistantText,
-        moodLabel: null,
-        moodScore: null,
-        createdAt: new Date().toISOString(),
-      };
-
-      const updatedConversation = {
-        ...draftConversation,
-        messages: [...draftConversation.messages, assistantMessage],
-        checkInPrompted: true,
-      };
-
-      updateConversationMood(updatedConversation);
-
-      setDb((previous) => {
-        const next = clone(previous);
-        const user = next.users[next.activeUserId];
-        if (!user) {
-          return previous;
-        }
-        user.conversations[dateKey] = updatedConversation;
-        const sequences = user.conversationSequences || {};
-        sequences[dateKey] = Math.max(sequences[dateKey] || 0, updatedConversation.sequenceNumber || 1);
-        user.conversationSequences = sequences;
-        next.users[next.activeUserId] = user;
-        return next;
-      });
-
-      void persistConversation(updatedConversation);
-    };
-
-    try {
-      const response = await fetch(`http://localhost:4000/api/chat/${activeUser.id}/message`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text, date: chatDate }),
-      });
-
-      if (!response.ok) {
-        throw new Error('Backend API failed');
-      }
-
-      const data = await response.json();
-      const messages = Array.isArray(data.messages) ? data.messages : [];
-      const lastAssistant = [...messages]
-        .reverse()
-        .find((message) => message?.sender === 'assistant' && message?.content);
-
-      if (!lastAssistant?.content) {
-        throw new Error('Assistant response missing');
-      }
-
-      appendAssistantMessage(String(lastAssistant.content));
-    } catch (error) {
-      console.error('Failed to get AI response:', error);
-      const userTurns = draftConversation.messages.filter((message) => message.sender === 'user').length;
-      appendAssistantMessage(
-        buildAiReply({
-          userName: profile.name,
-          userText: text,
-          moodLabel: mood.label,
-          userTurns,
-        })
-      );
-    }
+    void setDoc(conversationRef, draftConversation).catch(() => {
+      setSyncError('Cannot save your conversation right now. Check database rules/permissions.');
+    });
   };
 
   const endConversation = () => {

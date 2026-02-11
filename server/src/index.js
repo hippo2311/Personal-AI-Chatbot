@@ -13,7 +13,10 @@ const DEFAULT_CHECK_IN_TIME = '20:00';
 
 // ─── OPENAI CONFIG ───────────────────────────────────────────────────────────
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
-const OPENAI_MODEL = 'gpt-4o-mini'; // Change to 'gpt-4o' for better extraction
+const OPENAI_EXTRACTION_MODEL = 'o3'; // Best reasoning model for knowledge graph extraction
+const OPENAI_CHAT_MODEL = 'gpt-4o'; // For conversation & context traversal
+const OPENAI_MINI_MODEL = 'gpt-4o-mini'; // For simple checks
+const OPENAI_EMBEDDING_MODEL = 'text-embedding-3-small'; // Cheap & fast embeddings
 console.log('🔑 OpenAI key loaded:', OPENAI_API_KEY ? `${OPENAI_API_KEY.slice(0, 10)}...` : 'NOT FOUND');
 
 // ─── MOOD WORDS (kept for fast local fallback) ──────────────────────────────
@@ -209,8 +212,24 @@ app.post('/api/chat/:userId/message', async (req, res) => {
   const sessionMessages = getSessionMessages(userId, date);
   console.log(`📝 Session has ${sessionMessages.length} messages`);
 
-  // Load knowledge graph context
-  const kgContext = getRelevantKnowledgeContext(userId, text);
+  // ─── INTELLIGENT CONTEXT RETRIEVAL ──────────────────────────────────────
+  let knowledgeContext = '';
+  
+  try {
+    // Step 1: Check if context retrieval is needed
+    const needsContext = await checkIfContextNeeded(text);
+    console.log(`🤔 Context needed: ${needsContext}`);
+    
+    if (needsContext) {
+      // Step 2-4: Retrieve and filter relevant context
+      knowledgeContext = await getRelevantKnowledgeContext(userId, text);
+      console.log(`📚 Context retrieved:`, knowledgeContext ? 'Yes' : 'No relevant context');
+    }
+  } catch (err) {
+    console.error('⚠️ Context retrieval failed:', err.message);
+    // Continue without context if retrieval fails
+  }
+  // ────────────────────────────────────────────────────────────────────────
 
   let assistantReply;
   try {
@@ -220,7 +239,7 @@ app.post('/api/chat/:userId/message', async (req, res) => {
       moodLabel: mood.label,
       userMessageCount: sessionMessages.filter(m => m.sender === 'user').length,
       allMessages: sessionMessages,
-      knowledgeContext: kgContext,
+      knowledgeContext,
     });
   } catch (err) {
     console.error('❌ OpenAI error, falling back to template reply:', err.message);
@@ -434,22 +453,23 @@ app.listen(PORT, () => {
 });
 
 // ═════════════════════════════════════════════════════════════════════════════
-// OPENAI & KNOWLEDGE GRAPH
+// OPENAI & EMBEDDINGS
 // ═════════════════════════════════════════════════════════════════════════════
 
-function callOpenAI(messages, temperature = 0.7, maxTokens = 600) {
+function callOpenAI(messages, temperature = 0.7, maxTokens = 600, model = OPENAI_CHAT_MODEL) {
   return new Promise((resolve, reject) => {
     if (!OPENAI_API_KEY) {
       reject(new Error('OPENAI_API_KEY not set'));
       return;
     }
 
-    const body = JSON.stringify({
-      model: OPENAI_MODEL,
-      messages,
-      temperature,
-      max_tokens: maxTokens,
-    });
+    // o1/o3 models use max_completion_tokens and don't support temperature
+    const isReasoningModel = model.startsWith('o1') || model.startsWith('o3');
+    const requestBody = isReasoningModel
+      ? { model, messages, max_completion_tokens: maxTokens }
+      : { model, messages, temperature, max_tokens: maxTokens };
+
+    const body = JSON.stringify(requestBody);
 
     const options = {
       hostname: 'api.openai.com',
@@ -485,6 +505,340 @@ function callOpenAI(messages, temperature = 0.7, maxTokens = 600) {
   });
 }
 
+async function generateEmbedding(text) {
+  return new Promise((resolve, reject) => {
+    if (!OPENAI_API_KEY) {
+      reject(new Error('OPENAI_API_KEY not set'));
+      return;
+    }
+
+    const body = JSON.stringify({
+      model: OPENAI_EMBEDDING_MODEL,
+      input: text.substring(0, 8000), // Limit to 8k chars
+    });
+
+    const options = {
+      hostname: 'api.openai.com',
+      path: '/v1/embeddings',
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${OPENAI_API_KEY}`,
+        'Content-Length': Buffer.byteLength(body),
+      },
+    };
+
+    const req = https.request(options, (response) => {
+      let data = '';
+      response.on('data', (chunk) => { data += chunk; });
+      response.on('end', () => {
+        try {
+          const parsed = JSON.parse(data);
+          if (parsed.error) {
+            reject(new Error(parsed.error.message));
+            return;
+          }
+          resolve(parsed.data[0].embedding);
+        } catch (e) {
+          reject(new Error('Failed to parse embedding response'));
+        }
+      });
+    });
+
+    req.on('error', (err) => reject(err));
+    req.write(body);
+    req.end();
+  });
+}
+
+function cosineSimilarity(vecA, vecB) {
+  let dotProduct = 0;
+  let normA = 0;
+  let normB = 0;
+  
+  for (let i = 0; i < vecA.length; i++) {
+    dotProduct += vecA[i] * vecB[i];
+    normA += vecA[i] * vecA[i];
+    normB += vecB[i] * vecB[i];
+  }
+  
+  return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// INTELLIGENT CONTEXT RETRIEVAL
+// ═════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Step 1: Determine if context retrieval is needed
+ */
+async function checkIfContextNeeded(userMessage) {
+  const prompt = `You are analyzing a user's diary message to determine if they are referring to past events or memories.
+
+User message: "${userMessage}"
+
+Does this message reference or ask about past events, experiences, places, people, or things they've mentioned before?
+
+Examples of messages that NEED context:
+- "I miss that spicy noodle place"
+- "Tell me about when I went to Chongqing"
+- "What did I do last time I was there?"
+- "I want to go back to that restaurant"
+- "Remember when I told you about..."
+
+Examples of messages that DON'T need context (current/new experiences):
+- "I got scolded by my boss today"
+- "I just broke up with my girlfriend"
+- "I had a great day at work"
+- "I'm feeling stressed about the exam"
+
+Respond with ONLY "yes" or "no".`;
+
+  try {
+    const response = await callOpenAI([
+      { role: 'user', content: prompt }
+    ], 0.3, 10, OPENAI_MINI_MODEL); // Use mini for simple yes/no check
+    
+    return response.toLowerCase().includes('yes');
+  } catch (err) {
+    console.error('Error checking context need:', err);
+    return false; // Default to no context if check fails
+  }
+}
+
+/**
+ * Steps 2-4: Retrieve relevant context using embeddings + graph traversal + filtering
+ */
+async function getRelevantKnowledgeContext(userId, query) {
+  console.log(`🔍 Retrieving context for: "${query}"`);
+  
+  // Step 2: Find top 3 similar nodes using embeddings
+  const startNodes = await findSimilarNodesWithEmbeddings(userId, query, 3);
+  
+  if (startNodes.length === 0) {
+    console.log('📭 No similar nodes found');
+    return '';
+  }
+  
+  console.log(`📍 Starting from ${startNodes.length} nodes:`, 
+    startNodes.map(n => `${n.name} (${(n.similarity * 100).toFixed(1)}%)`));
+  
+  // Step 3: Perform 2-hop graph traversal from these nodes
+  const subgraphs = [];
+  for (const startNode of startNodes) {
+    // Only traverse from highly similar nodes (>70% similarity)
+    if (startNode.similarity < 0.3) continue;
+    
+    const subgraph = traverseGraphFromNode(userId, startNode, 2);
+    subgraphs.push({ startNode, subgraph });
+  }
+  
+  if (subgraphs.length === 0) {
+    console.log('📭 No subgraphs with sufficient similarity');
+    return '';
+  }
+  
+  // Step 4: Let AI determine relevance and extract only relevant context
+  const rawContext = formatSubgraphsForFiltering(subgraphs);
+  const relevantContext = await filterRelevantContext(query, rawContext);
+  
+  return relevantContext;
+}
+
+/**
+ * Find similar nodes using vector embeddings
+ */
+async function findSimilarNodesWithEmbeddings(userId, query, topK = 3) {
+  try {
+    // Generate embedding for query
+    const queryEmbedding = await generateEmbedding(query);
+    
+    // Get all entities and events with embeddings
+    const entities = db.prepare(
+      `SELECT id, name, entity_type, embedding FROM kg_entities 
+       WHERE user_id = ? AND embedding IS NOT NULL`
+    ).all(userId);
+    
+    const events = db.prepare(
+      `SELECT id, summary, event_date, importance, embedding FROM kg_events 
+       WHERE user_id = ? AND embedding IS NOT NULL`
+    ).all(userId);
+    
+    // Calculate similarity for each
+    const scoredNodes = [];
+    
+    for (const entity of entities) {
+      const embedding = JSON.parse(entity.embedding);
+      const similarity = cosineSimilarity(queryEmbedding, embedding);
+      scoredNodes.push({
+        id: `entity:${entity.id}`,
+        type: 'entity',
+        name: entity.name,
+        entityType: entity.entity_type,
+        similarity,
+      });
+    }
+    
+    for (const event of events) {
+      const embedding = JSON.parse(event.embedding);
+      const similarity = cosineSimilarity(queryEmbedding, embedding);
+      scoredNodes.push({
+        id: `event:${event.id}`,
+        type: 'event',
+        name: event.summary,
+        eventDate: event.event_date,
+        importance: event.importance,
+        similarity,
+      });
+    }
+    
+    // Return top K most similar
+    return scoredNodes
+      .sort((a, b) => b.similarity - a.similarity)
+      .slice(0, topK);
+      
+  } catch (err) {
+    console.error('Error finding similar nodes:', err);
+    return [];
+  }
+}
+
+/**
+ * Traverse graph using BFS from a starting node
+ */
+function traverseGraphFromNode(userId, startNode, maxHops = 2) {
+  const visited = new Set();
+  const results = { events: [], entities: [], relationships: [] };
+  const queue = [{ id: startNode.id, hop: 0 }];
+  
+  while (queue.length > 0) {
+    const { id, hop } = queue.shift();
+    
+    if (visited.has(id) || hop > maxHops) continue;
+    visited.add(id);
+    
+    // Get all relationships from/to this node
+    const rels = db.prepare(
+      `SELECT * FROM kg_relationships 
+       WHERE from_id = ? OR to_id = ?
+       ORDER BY strength DESC`
+    ).all(id, id);
+    
+    for (const rel of rels) {
+      results.relationships.push(rel);
+      
+      const neighborId = rel.from_id === id ? rel.to_id : rel.from_id;
+      
+      if (!visited.has(neighborId)) {
+        queue.push({ id: neighborId, hop: hop + 1 });
+        
+        // Fetch neighbor details
+        if (neighborId.startsWith('event:')) {
+          const eventId = neighborId.split(':')[1];
+          const event = db.prepare(
+            `SELECT * FROM kg_events WHERE id = ?`
+          ).get(eventId);
+          if (event) {
+            results.events.push({
+              ...event,
+              domains: safeJsonParse(event.domains, []),
+              keywords: safeJsonParse(event.keywords, []),
+            });
+          }
+        } else if (neighborId.startsWith('entity:')) {
+          const entityId = neighborId.split(':')[1];
+          const entity = db.prepare(
+            `SELECT * FROM kg_entities WHERE id = ?`
+          ).get(entityId);
+          if (entity) {
+            results.entities.push({
+              ...entity,
+              attributes: safeJsonParse(entity.attributes, {}),
+            });
+          }
+        }
+      }
+    }
+  }
+  
+  return results;
+}
+
+/**
+ * Format subgraphs for AI filtering
+ */
+function formatSubgraphsForFiltering(subgraphs) {
+  let formatted = '';
+  
+  for (const { startNode, subgraph } of subgraphs) {
+    formatted += `\n=== Starting from: ${startNode.name} ===\n`;
+    
+    // Events (sorted by recency)
+    const sortedEvents = subgraph.events.sort((a, b) => 
+      new Date(b.event_date) - new Date(a.event_date)
+    );
+    
+    for (const event of sortedEvents) {
+      formatted += `Event: ${event.summary} (${event.event_date}, importance: ${event.importance}/5)\n`;
+    }
+    
+    // Entities
+    for (const entity of subgraph.entities) {
+      formatted += `Entity: ${entity.name} (${entity.entity_type})\n`;
+    }
+    
+    // Key relationships
+    for (const rel of subgraph.relationships.slice(0, 5)) {
+      formatted += `Relationship: ${rel.from_id} --[${rel.relationship_type}]--> ${rel.to_id}\n`;
+    }
+    
+    formatted += '\n';
+  }
+  
+  return formatted;
+}
+
+/**
+ * Step 4: Filter relevant context using AI
+ */
+async function filterRelevantContext(userQuery, rawContext) {
+  const prompt = `You are analyzing context from a user's past diary entries to determine what's relevant to their current message.
+
+User's current message: "${userQuery}"
+
+Available context from past memories:
+${rawContext}
+
+Task: Extract ONLY the information that is directly relevant to answering or responding to the user's current message. Remove any unrelated memories or details.
+
+If the context IS relevant, provide a concise summary (2-4 sentences) of the relevant memories.
+If the context is NOT relevant or doesn't help, respond with exactly: "NO_RELEVANT_CONTEXT"
+
+Relevant summary:`;
+
+  try {
+    const response = await callOpenAI([
+      { role: 'user', content: prompt }
+    ], 0.3, 200, OPENAI_CHAT_MODEL); // Use gpt-4o for context filtering
+    
+    if (response.includes('NO_RELEVANT_CONTEXT')) {
+      console.log('🚫 AI determined context is not relevant');
+      return '';
+    }
+    
+    console.log('✅ AI filtered relevant context');
+    return response;
+    
+  } catch (err) {
+    console.error('Error filtering context:', err);
+    return ''; // Fallback to no context
+  }
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// ASSISTANT REPLY
+// ═════════════════════════════════════════════════════════════════════════════
+
 async function buildAssistantReplyAI({ userName, userText, moodLabel, userMessageCount, allMessages, knowledgeContext }) {
   const text = userText.toLowerCase();
   if (/\b(bye|good night|end|wrap up|done|stop)\b/.test(text)) {
@@ -504,23 +858,29 @@ async function buildAssistantReplyAI({ userName, userText, moodLabel, userMessag
 Personality: caring, non-judgmental, ask one focused question per reply, keep to 2-3 sentences.
 Current mood: ${moodLabel}
 
-${userName}'s memories:
-${knowledgeContext || 'No past memories yet.'}
+${knowledgeContext ? `\nRelevant memories from ${userName}'s past:\n${knowledgeContext}\n` : ''}
 
 Suggest ending if ${userMessageCount} >= 6 messages.`;
 
   const reply = await callOpenAI([
     { role: 'system', content: systemPrompt },
     ...history,
-  ], 0.75, 300);
+  ], 0.75, 300, OPENAI_CHAT_MODEL); // Use gpt-4o for chat
 
   return { reply, promptToEnd: userMessageCount >= 5 };
 }
 
+// ═════════════════════════════════════════════════════════════════════════════
+// KNOWLEDGE GRAPH EXTRACTION
+// ═════════════════════════════════════════════════════════════════════════════
+
 async function extractKnowledgeGraphFromConversation(sessionMessages, userId, date) {
   const conversation = sessionMessages.map(m => `${m.sender.toUpperCase()}: ${m.content}`).join('\n');
 
-  const systemPrompt = `You are a knowledge graph extractor for a personal diary app.
+  console.log('🤖 Calling OpenAI o3-mini for knowledge graph extraction...');
+
+  // o1 models don't support system messages, so we merge the prompt into user message
+  const fullPrompt = `You are a knowledge graph extractor for a personal diary app.
 
 CRITICAL: Extract ALL distinct events, entities, and relationships from this conversation.
 Do NOT summarize or combine events - extract each one separately.
@@ -541,51 +901,18 @@ Return ONLY valid JSON (no markdown, no code fences, no preamble):
   ]
 }
 
-EXAMPLES:
-
-Input: "I went to Chongqing and loved the xiaomian! Then I visited the Hongya Cave."
-Output:
-{
-  "entities": [
-    {"id": "e1", "type": "place", "name": "Chongqing", "attributes": {"country": "China"}},
-    {"id": "e2", "type": "food", "name": "Chongqing xiaomian", "attributes": {"cuisine": "Sichuanese"}},
-    {"id": "e3", "type": "place", "name": "Hongya Cave", "attributes": {"type": "tourist attraction"}},
-    {"id": "e4", "type": "preference", "name": "spicy food", "attributes": {}}
-  ],
-  "events": [
-    {"id": "ev1", "summary": "User traveled to Chongqing", "event_type": "travel", "domains": ["Personal Life"], "emotional_tone": "excited", "importance": 4, "related_entities": ["e1"], "keywords": ["travel", "China"]},
-    {"id": "ev2", "summary": "User ate Chongqing xiaomian", "event_type": "dining", "domains": ["Personal Life"], "emotional_tone": "happy", "importance": 3, "related_entities": ["e2", "e1"], "keywords": ["food", "xiaomian"]},
-    {"id": "ev3", "summary": "User visited Hongya Cave", "event_type": "experience", "domains": ["Personal Life"], "emotional_tone": "excited", "importance": 3, "related_entities": ["e3", "e1"], "keywords": ["tourism", "sightseeing"]}
-  ],
-  "relationships": [
-    {"from_id": "ev1", "to_id": "e1", "relationship_type": "visited", "strength": 5},
-    {"from_id": "ev2", "to_id": "e2", "relationship_type": "ate", "strength": 5},
-    {"from_id": "ev2", "to_id": "ev1", "relationship_type": "part_of", "strength": 5},
-    {"from_id": "ev3", "to_id": "e3", "relationship_type": "visited", "strength": 5},
-    {"from_id": "ev3", "to_id": "ev1", "relationship_type": "part_of", "strength": 5},
-    {"from_id": "e2", "to_id": "e1", "relationship_type": "located_in", "strength": 5},
-    {"from_id": "e3", "to_id": "e1", "relationship_type": "located_in", "strength": 5},
-    {"from_id": "user", "to_id": "e4", "relationship_type": "prefers", "strength": 4},
-    {"from_id": "e2", "to_id": "e4", "relationship_type": "is_type_of", "strength": 5}
-  ]
-}
-
 REMEMBER:
-- Extract EVERY distinct event separately (don't combine "went to X and did Y" into one event - make it two!)
-- Include all entities mentioned (places, people, foods, activities, preferences)
-- Create relationships between events (temporal, causal, part-of)
-- Create relationships between entities and events
-- Be thorough - missing events means losing memories!`;
+- Extract EVERY distinct event separately
+- Include all entities mentioned
+- Create relationships between events and entities
+- Be thorough - missing events means losing memories!
 
-  console.log('🤖 Calling OpenAI for knowledge graph extraction...');
-  console.log('📝 Conversation length:', conversation.length, 'characters');
+Conversation to extract from:
+${conversation}`;
 
   const raw = await callOpenAI([
-    { role: 'system', content: systemPrompt },
-    { role: 'user', content: `Extract knowledge graph from this diary conversation:\n\n${conversation}` },
-  ], 0.1, 3000);
-
-  console.log('📦 Raw OpenAI response:', raw.substring(0, 300));
+    { role: 'user', content: fullPrompt },
+  ], 0.1, 3000, OPENAI_EXTRACTION_MODEL); // Use o1 for best extraction quality
 
   const start = raw.indexOf('{');
   const end = raw.lastIndexOf('}') + 1;
@@ -607,32 +934,38 @@ async function saveKnowledgeGraph(graph, userId, date) {
 
   console.log(`💾 Saving ${entities.length} entities, ${events.length} events, ${relationships.length} relationships`);
 
-  // Map AI IDs to database IDs
   const entityIdMap = {};
   const eventIdMap = {};
 
-  // Save entities
+  // Save entities with embeddings
   for (const entity of entities) {
+    const text = `${entity.name} ${JSON.stringify(entity.attributes)}`;
+    const embedding = await generateEmbedding(text);
+    
     const result = db.prepare(
-      `INSERT OR REPLACE INTO kg_entities (user_id, entity_id, entity_type, name, attributes, created_at)
-       VALUES (?, ?, ?, ?, ?, ?)`
+      `INSERT OR REPLACE INTO kg_entities (user_id, entity_id, entity_type, name, attributes, embedding, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
     ).run(
       userId,
       entity.id,
       entity.type,
       entity.name,
       JSON.stringify(entity.attributes || {}),
+      JSON.stringify(embedding),
       nowIso()
     );
     entityIdMap[entity.id] = `entity:${result.lastInsertRowid}`;
     console.log(`  💾 Entity saved: ${entity.name} (DB ID: ${result.lastInsertRowid})`);
   }
 
-  // Save events - using auto-increment, no unique constraint on event_id
+  // Save events with embeddings
   for (const event of events) {
+    const text = `${event.summary} ${event.keywords?.join(' ')}`;
+    const embedding = await generateEmbedding(text);
+    
     const result = db.prepare(
-      `INSERT INTO kg_events (user_id, event_date, summary, event_type, domains, emotional_tone, importance, related_entities, keywords, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO kg_events (user_id, event_date, summary, event_type, domains, emotional_tone, importance, related_entities, keywords, embedding, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
       userId,
       date,
@@ -643,13 +976,14 @@ async function saveKnowledgeGraph(graph, userId, date) {
       event.importance || 3,
       JSON.stringify(event.related_entities || []),
       JSON.stringify(event.keywords || []),
+      JSON.stringify(embedding),
       nowIso()
     );
     eventIdMap[event.id] = `event:${result.lastInsertRowid}`;
     console.log(`  💾 Event saved: ${event.summary.substring(0, 50)}... (DB ID: ${result.lastInsertRowid})`);
   }
 
-  // Save relationships - map AI IDs to DB IDs
+  // Save relationships
   for (const rel of relationships) {
     const fromId = eventIdMap[rel.from_id] || entityIdMap[rel.from_id] || rel.from_id;
     const toId = eventIdMap[rel.to_id] || entityIdMap[rel.to_id] || rel.to_id;
@@ -658,39 +992,14 @@ async function saveKnowledgeGraph(graph, userId, date) {
       `INSERT INTO kg_relationships (user_id, from_id, to_id, relationship_type, strength, created_at)
        VALUES (?, ?, ?, ?, ?, ?)`
     ).run(userId, fromId, toId, rel.relationship_type, rel.strength || 3, nowIso());
-    
-    console.log(`  💾 Relationship: ${fromId} --[${rel.relationship_type}]--> ${toId}`);
   }
 
-  console.log(`✅ Saved ${entities.length} entities, ${events.length} events, ${relationships.length} relationships`);
+  console.log(`✅ Saved knowledge graph with embeddings`);
 }
 
-function getRelevantKnowledgeContext(userId, query) {
-  const keywords = query.toLowerCase().split(/\s+/).filter(w => w.length > 3);
-  if (!keywords.length) return '';
-
-  const placeholders = keywords.map(() => 'LOWER(name) LIKE ?').join(' OR ');
-  const entities = db.prepare(
-    `SELECT * FROM kg_entities WHERE user_id = ? AND (${placeholders}) LIMIT 10`
-  ).all(userId, ...keywords.map(k => `%${k}%`));
-
-  if (!entities.length) return '';
-
-  let context = '';
-  for (const entity of entities) {
-    const events = db.prepare(
-      `SELECT * FROM kg_events WHERE user_id = ? AND related_entities LIKE ? ORDER BY event_date DESC LIMIT 3`
-    ).all(userId, `%${entity.entity_id}%`);
-
-    if (events.length) {
-      context += `\n📍 ${entity.name}:\n`;
-      for (const event of events) {
-        context += `  - ${event.summary} (${event.event_date})\n`;
-      }
-    }
-  }
-  return context;
-}
+// ═════════════════════════════════════════════════════════════════════════════
+// GRAPH VISUALIZATION
+// ═════════════════════════════════════════════════════════════════════════════
 
 function getKnowledgeGraphEvents(userId) {
   return db.prepare('SELECT * FROM kg_events WHERE user_id = ? ORDER BY created_at ASC').all(userId).map(r => ({
@@ -764,8 +1073,6 @@ function buildGraphNodes(events, entities) {
     icon: entityTypeMeta[entity.entity_type]?.icon || '⭐',
   }));
 
-  console.log(`📊 Built ${domainNodes.length} domain nodes, ${eventNodes.length} event nodes, ${entityNodes.length} entity nodes`);
-
   return [...domainNodes, ...eventNodes, ...entityNodes];
 }
 
@@ -773,7 +1080,6 @@ function buildGraphEdges(events, relationships) {
   const edges = [];
   const lastEventPerDomain = {};
 
-  // Add edges from kg_relationships table (the connections we want!)
   for (const rel of relationships) {
     edges.push({
       source: rel.from_id,
@@ -783,7 +1089,6 @@ function buildGraphEdges(events, relationships) {
     });
   }
 
-  // Add edges from events to domains
   for (const ev of events) {
     for (const domain of ev.domains) {
       edges.push({ 
@@ -792,7 +1097,6 @@ function buildGraphEdges(events, relationships) {
         type: 'BELONGS TO' 
       });
       
-      // Temporal continuity within same domain
       if (lastEventPerDomain[domain]) {
         edges.push({ 
           source: `event:${ev.id}`, 
@@ -803,8 +1107,6 @@ function buildGraphEdges(events, relationships) {
       lastEventPerDomain[domain] = ev.id;
     }
   }
-
-  console.log(`📊 Built ${edges.length} edges (${relationships.length} from relationships, ${edges.length - relationships.length} domain/temporal)`);
 
   return edges;
 }
@@ -845,6 +1147,7 @@ function initSchema() {
       entity_type TEXT NOT NULL,
       name TEXT NOT NULL,
       attributes TEXT,
+      embedding TEXT,
       created_at TEXT NOT NULL,
       UNIQUE(user_id, entity_id),
       FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
@@ -861,6 +1164,7 @@ function initSchema() {
       importance INTEGER,
       related_entities TEXT,
       keywords TEXT,
+      embedding TEXT,
       created_at TEXT NOT NULL,
       FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
     );

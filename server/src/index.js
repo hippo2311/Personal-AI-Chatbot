@@ -12,11 +12,11 @@ const DEFAULT_NAME = 'Friend';
 const DEFAULT_CHECK_IN_TIME = '20:00';
 
 // ─── OPENAI CONFIG ───────────────────────────────────────────────────────────
-// Set your OpenAI API key in the environment: OPENAI_API_KEY=sk-...
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
-const OPENAI_MODEL = 'gpt-4o-mini';
+const OPENAI_MODEL = 'gpt-4o-mini'; // Change to 'gpt-4o' for better extraction
 console.log('🔑 OpenAI key loaded:', OPENAI_API_KEY ? `${OPENAI_API_KEY.slice(0, 10)}...` : 'NOT FOUND');
-// ─── MOOD WORDS (kept for fast local fallback if OpenAI is unavailable) ──────
+
+// ─── MOOD WORDS (kept for fast local fallback) ──────────────────────────────
 const POSITIVE_WORDS = new Set([
   'good', 'great', 'happy', 'awesome', 'excited', 'productive',
   'love', 'amazing', 'fantastic', 'chill', 'better', 'calm',
@@ -40,6 +40,55 @@ const ALLOWED_DOMAINS = [
   'Family',
 ];
 
+// ─── IN-MEMORY SESSION STORAGE ───────────────────────────────────────────────
+const activeSessions = new Map();
+
+function getSessionKey(userId, date) {
+  return `${userId}:${date}`;
+}
+
+function getOrCreateActiveSession(userId, date) {
+  const key = getSessionKey(userId, date);
+  if (!activeSessions.has(key)) {
+    activeSessions.set(key, {
+      messages: [],
+      startedAt: nowIso(),
+    });
+  }
+  return activeSessions.get(key);
+}
+
+function addMessageToSession(userId, date, sender, content, moodLabel = null, moodScore = null) {
+  const session = getOrCreateActiveSession(userId, date);
+  session.messages.push({
+    id: randomId(),
+    sender,
+    content,
+    moodLabel,
+    moodScore,
+    createdAt: nowIso(),
+  });
+  return session.messages;
+}
+
+function getSessionMessages(userId, date) {
+  const key = getSessionKey(userId, date);
+  const session = activeSessions.get(key);
+  return session ? session.messages : [];
+}
+
+function clearSession(userId, date) {
+  const key = getSessionKey(userId, date);
+  const messages = getSessionMessages(userId, date);
+  activeSessions.delete(key);
+  console.log(`🗑️ Cleared session for ${key} (${messages.length} messages)`);
+  return messages;
+}
+
+function randomId() {
+  return Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
+}
+
 // ─── DATABASE SETUP ───────────────────────────────────────────────────────────
 const dataDir = path.join(__dirname, '..', 'data');
 fs.mkdirSync(dataDir, { recursive: true });
@@ -54,7 +103,7 @@ app.use(express.json());
 
 initSchema();
 
-// ─── EXISTING ROUTES (unchanged) ─────────────────────────────────────────────
+// ─── ROUTES ──────────────────────────────────────────────────────────────────
 
 app.get('/api/health', (_req, res) => {
   res.json({ ok: true, timestamp: nowIso() });
@@ -94,21 +143,42 @@ app.get('/api/chat/:userId/today', (req, res) => {
   ensureConversation(userId, date);
 
   let conversation = getConversation(userId, date);
-  maybeSeedCheckInPrompt(user, conversation, date, forcePrompt);
+
+  // Send initial prompt if needed
+  if (!conversation.is_ended && forcePrompt) {
+    const sessionMessages = getSessionMessages(userId, date);
+    if (sessionMessages.length === 0) {
+      addMessageToSession(
+        userId,
+        date,
+        'assistant',
+        `Hi ${user.name}, how was your day?`,
+        null,
+        null
+      );
+    }
+  }
 
   conversation = getConversation(userId, date);
-  const messages = getMessages(conversation.id).map(mapMessage);
+  const messages = getSessionMessages(userId, date);
 
   res.json({
     user: mapUser(user),
     conversation: mapConversation(conversation),
-    messages,
+    messages: messages.map(m => ({
+      id: m.id,
+      conversationId: conversation.id,
+      sender: m.sender,
+      content: m.content,
+      moodLabel: m.moodLabel,
+      moodScore: m.moodScore,
+      createdAt: m.createdAt,
+    })),
   });
 });
 
-// ─── MODIFIED: /message now calls OpenAI for the assistant reply ──────────────
 app.post('/api/chat/:userId/message', async (req, res) => {
-  console.log('📨 Received message from user');  // ADD THIS
+  console.log('📨 Received message from user');
   const userId = safeUserId(req.params.userId);
   const text = String(req.body?.text || '').trim();
   const date = normalizeDate(req.body?.date);
@@ -130,18 +200,17 @@ app.post('/api/chat/:userId/message', async (req, res) => {
     return;
   }
 
-  // Analyze mood (local keyword method — fast, no API call needed)
+  // Analyze mood
   const mood = analyzeMood(text);
-  insertMessage(conversation.id, 'user', text, mood);
-  updateConversationMood(conversation.id);
 
-  const updatedConversation = getConversation(userId, date);
+  // Add user message to in-memory session
+  addMessageToSession(userId, date, 'user', text, mood.label, mood.score);
 
-  // Load full message history for context
-  const allMessages = getMessages(updatedConversation.id);
+  const sessionMessages = getSessionMessages(userId, date);
+  console.log(`📝 Session has ${sessionMessages.length} messages`);
 
-  // Load graph events for this user as extra context
-  const graphEvents = getGraphEvents(userId);
+  // Load knowledge graph context
+  const kgContext = getRelevantKnowledgeContext(userId, text);
 
   let assistantReply;
   try {
@@ -149,36 +218,43 @@ app.post('/api/chat/:userId/message', async (req, res) => {
       userName: user.name,
       userText: text,
       moodLabel: mood.label,
-      userMessageCount: updatedConversation.user_message_count,
-      allMessages,
-      graphEvents,
+      userMessageCount: sessionMessages.filter(m => m.sender === 'user').length,
+      allMessages: sessionMessages,
+      knowledgeContext: kgContext,
     });
   } catch (err) {
     console.error('❌ OpenAI error, falling back to template reply:', err.message);
-    console.error('Full error details:', err);
-    console.error('Stack trace:', err.stack);
-    // Graceful fallback to original template system
+
     assistantReply = buildAssistantReplyTemplate({
       userName: user.name,
       userText: text,
       moodLabel: mood.label,
-      userMessageCount: updatedConversation.user_message_count,
+      userMessageCount: sessionMessages.filter(m => m.sender === 'user').length,
     });
   }
 
-  insertMessage(conversation.id, 'assistant', assistantReply.reply, null);
+  // Add assistant reply to in-memory session
+  addMessageToSession(userId, date, 'assistant', assistantReply.reply, null, null);
 
   const finalConversation = getConversation(userId, date);
-  const messages = getMessages(finalConversation.id).map(mapMessage);
+  const finalMessages = getSessionMessages(userId, date);
 
   res.json({
     conversation: mapConversation(finalConversation),
-    messages,
+    messages: finalMessages.map(m => ({
+      id: m.id,
+      conversationId: conversation.id,
+      sender: m.sender,
+      content: m.content,
+      moodLabel: m.moodLabel,
+      moodScore: m.moodScore,
+      createdAt: m.createdAt,
+    })),
     promptToEnd: assistantReply.promptToEnd,
   });
 });
 
-app.post('/api/chat/:userId/end-day', (req, res) => {
+app.post('/api/chat/:userId/end-day', async (req, res) => {
   const userId = safeUserId(req.params.userId);
   const date = normalizeDate(req.body?.date);
 
@@ -186,7 +262,11 @@ app.post('/api/chat/:userId/end-day', (req, res) => {
   ensureConversation(userId, date);
 
   const conversation = getConversation(userId, date);
+
   if (!conversation.is_ended) {
+    console.log(`🔚 Ending conversation for ${userId} on ${date}`);
+
+    // Mark conversation as ended
     db.prepare(
       `UPDATE conversations
         SET is_ended = 1,
@@ -195,21 +275,45 @@ app.post('/api/chat/:userId/end-day', (req, res) => {
         WHERE id = ?`
     ).run(nowIso(), nowIso(), conversation.id);
 
-    insertMessage(
-      conversation.id,
-      'assistant',
-      `Nice work checking in today, ${user.name}. I will ask again at ${user.check_in_time} tomorrow.`,
-      null
-    );
+    // Extract knowledge graph from session
+    const sessionMessages = getSessionMessages(userId, date);
+    console.log(`📊 Found ${sessionMessages.length} messages in session`);
+
+    if (sessionMessages.length >= 2) {
+      try {
+        console.log('🚀 Starting knowledge graph extraction...');
+        await extractKnowledgeGraphFromConversation(sessionMessages, userId, date);
+        console.log(`✅ Knowledge graph extracted`);
+      } catch (err) {
+        console.error('❌ Failed to extract:', err.message);
+        console.error('Full error:', err);
+      }
+    } else {
+      console.log('⚠️ Not enough messages in session (need at least 2)');
+    }
+
+    // Clear session
+    clearSession(userId, date);
+
+    const goodbyeMessage = {
+      id: randomId(),
+      sender: 'assistant',
+      content: `Nice work checking in today, ${user.name}. I will ask again at ${user.check_in_time} tomorrow.`,
+      moodLabel: null,
+      moodScore: null,
+      createdAt: nowIso(),
+    };
+
+    res.json({
+      conversation: mapConversation(getConversation(userId, date)),
+      messages: [goodbyeMessage],
+    });
+  } else {
+    res.json({
+      conversation: mapConversation(conversation),
+      messages: [],
+    });
   }
-
-  const finalConversation = getConversation(userId, date);
-  const messages = getMessages(finalConversation.id).map(mapMessage);
-
-  res.json({
-    conversation: mapConversation(finalConversation),
-    messages,
-  });
 });
 
 app.get('/api/dashboard/:userId', (req, res) => {
@@ -219,23 +323,9 @@ app.get('/api/dashboard/:userId', (req, res) => {
   const user = ensureUser(userId);
   const rows = db
     .prepare(
-      `SELECT
-          c.id,
-          c.user_id,
-          c.date,
-          c.mood_label,
-          c.mood_score,
-          c.is_ended,
-          c.started_at,
-          c.ended_at,
-          c.updated_at,
-          COALESCE(SUM(CASE WHEN m.sender = 'user' THEN 1 ELSE 0 END), 0) AS user_message_count,
-          COALESCE(SUM(CASE WHEN m.sender = 'assistant' THEN 1 ELSE 0 END), 0) AS assistant_message_count
-        FROM conversations c
-        LEFT JOIN messages m ON m.conversation_id = c.id
-        WHERE c.user_id = ?
-        GROUP BY c.id
-        ORDER BY c.date DESC
+      `SELECT * FROM conversations
+        WHERE user_id = ?
+        ORDER BY date DESC
         LIMIT ?`
     )
     .all(userId, days);
@@ -252,31 +342,22 @@ app.get('/api/dashboard/:userId', (req, res) => {
   });
 
   const totalTrackedDays = rows.length;
-  const averageMoodScore = totalTrackedDays
-    ? Number((totalMoodScore / totalTrackedDays).toFixed(2))
-    : 0;
-  const checkInsLast7Days = rows.filter((row) => {
-    const diff = dayjs().startOf('day').diff(dayjs(row.date), 'day');
-    return diff >= 0 && diff <= 6;
-  }).length;
+  const averageMoodScore = totalTrackedDays ? Number((totalMoodScore / totalTrackedDays).toFixed(2)) : 0;
 
   const summary = {
     totalTrackedDays,
     averageMoodScore,
     averageMoodLabel: moodLabelFromScore(averageMoodScore),
-    completionRate: totalTrackedDays
-      ? Number(((endedCount / totalTrackedDays) * 100).toFixed(1))
-      : 0,
-    checkInsLast7Days,
+    completionRate: totalTrackedDays ? Number(((endedCount / totalTrackedDays) * 100).toFixed(1)) : 0,
+    checkInsLast7Days: rows.filter((row) => dayjs().startOf('day').diff(dayjs(row.date), 'day') <= 6).length,
     streakDays: computeRecentStreak(rows),
   };
 
   const trend = [...rows].reverse().map((row) => ({
     date: row.date,
     moodLabel: row.mood_label,
-    moodScore: Number(Number(row.mood_score).toFixed(2)),
+    moodScore: Number(row.mood_score.toFixed(2)),
     isEnded: Boolean(row.is_ended),
-    userMessageCount: Number(row.user_message_count),
   }));
 
   res.json({
@@ -289,64 +370,59 @@ app.get('/api/dashboard/:userId', (req, res) => {
   });
 });
 
-// ─── NEW: Graph endpoints ─────────────────────────────────────────────────────
+// ─── KNOWLEDGE GRAPH ENDPOINTS ───────────────────────────────────────────────
 
-// GET /api/graph/:userId — return all graph nodes and edges
 app.get('/api/graph/:userId', (req, res) => {
   const userId = safeUserId(req.params.userId);
   ensureUser(userId);
 
-  const events = getGraphEvents(userId);
-  const nodes = buildGraphNodes(events);
-  const edges = buildGraphEdges(events);
+  const events = getKnowledgeGraphEvents(userId);
+  const entities = getKnowledgeGraphEntities(userId);
+  const relationships = getKnowledgeGraphRelationships(userId);
+  
+  const nodes = buildGraphNodes(events, entities);
+  const edges = buildGraphEdges(events, relationships);
 
-  res.json({ nodes, edges, eventCount: events.length });
+  console.log(`📊 Graph data: ${nodes.length} nodes, ${edges.length} edges`);
+
+  res.json({ 
+    nodes, 
+    edges, 
+    eventCount: events.length,
+    entityCount: entities.length,
+  });
 });
 
-// POST /api/graph/:userId/extract — extract events from a completed conversation
-// and save them into the graph. Call this when "End Day" is pressed.
-app.post('/api/graph/:userId/extract', async (req, res) => {
-  const userId = safeUserId(req.params.userId);
-  const date = normalizeDate(req.body?.date);
-
-  ensureUser(userId);
-  const conversation = getConversation(userId, date);
-  if (!conversation) {
-    res.status(404).json({ error: 'No conversation found for this date.' });
-    return;
-  }
-
-  const allMessages = getMessages(conversation.id);
-  if (allMessages.length < 2) {
-    res.json({ extracted: 0, message: 'Not enough messages to extract events.' });
-    return;
-  }
-
-  try {
-    const events = await extractEventsFromConversation(allMessages, userId, date);
-    res.json({ extracted: events.length, events });
-  } catch (err) {
-    console.error('Event extraction failed:', err.message);
-    res.status(500).json({ error: 'Event extraction failed: ' + err.message });
-  }
-});
-
-// DELETE /api/graph/:userId/event/:eventId — remove a specific event node
 app.delete('/api/graph/:userId/event/:eventId', (req, res) => {
   const userId = safeUserId(req.params.userId);
   const eventId = Number(req.params.eventId);
 
-  const row = db.prepare('SELECT * FROM graph_events WHERE id = ? AND user_id = ?').get(eventId, userId);
+  const row = db.prepare('SELECT * FROM kg_events WHERE id = ? AND user_id = ?').get(eventId, userId);
   if (!row) {
     res.status(404).json({ error: 'Event not found.' });
     return;
   }
 
-  db.prepare('DELETE FROM graph_events WHERE id = ?').run(eventId);
+  db.prepare('DELETE FROM kg_events WHERE id = ?').run(eventId);
+  db.prepare('DELETE FROM kg_relationships WHERE from_id = ? OR to_id = ?').run(`event:${eventId}`, `event:${eventId}`);
+  
   res.json({ deleted: true, id: eventId });
 });
 
-// ─── ERROR HANDLER ────────────────────────────────────────────────────────────
+app.delete('/api/graph/:userId/clear', (req, res) => {
+  const userId = safeUserId(req.params.userId);
+  ensureUser(userId);
+
+  const eventResult = db.prepare('DELETE FROM kg_events WHERE user_id = ?').run(userId);
+  const entityResult = db.prepare('DELETE FROM kg_entities WHERE user_id = ?').run(userId);
+  const relResult = db.prepare('DELETE FROM kg_relationships WHERE user_id = ?').run(userId);
+
+  res.json({
+    deleted: eventResult.changes + entityResult.changes + relResult.changes,
+    message: `Cleared knowledge graph.`,
+  });
+});
+
 app.use((error, _req, res, _next) => {
   console.error(error);
   res.status(500).json({ error: 'Unexpected server error.' });
@@ -354,21 +430,14 @@ app.use((error, _req, res, _next) => {
 
 app.listen(PORT, () => {
   console.log(`AI diary server running on http://localhost:${PORT}`);
-  if (!OPENAI_API_KEY) {
-    console.warn('⚠  OPENAI_API_KEY is not set. AI replies will use fallback templates.');
-  }
+  if (!OPENAI_API_KEY) console.warn('⚠  OPENAI_API_KEY not set.');
 });
 
 // ═════════════════════════════════════════════════════════════════════════════
-// OPENAI HELPERS
+// OPENAI & KNOWLEDGE GRAPH
 // ═════════════════════════════════════════════════════════════════════════════
 
-/**
- * Low-level: call the OpenAI chat completions endpoint.
- * Uses Node's built-in https so no extra dependency needed.
- */
 function callOpenAI(messages, temperature = 0.7, maxTokens = 600) {
-  console.log('🔵 Calling OpenAI API...');  // ADD THIS
   return new Promise((resolve, reject) => {
     if (!OPENAI_API_KEY) {
       reject(new Error('OPENAI_API_KEY not set'));
@@ -394,248 +463,354 @@ function callOpenAI(messages, temperature = 0.7, maxTokens = 600) {
     };
 
     const req = https.request(options, (response) => {
-      console.log('📡 OpenAI response status:', response.statusCode);  // ADD THIS
       let data = '';
       response.on('data', (chunk) => { data += chunk; });
       response.on('end', () => {
-        console.log('📦 OpenAI raw response:', data.substring(0, 200));  // ADD THIS
         try {
           const parsed = JSON.parse(data);
           if (parsed.error) {
-            console.error('❌ OpenAI returned error:', parsed.error);  // ADD THIS
             reject(new Error(parsed.error.message));
             return;
           }
           resolve(parsed.choices[0].message.content.trim());
         } catch (e) {
-          console.error('❌ Failed to parse OpenAI response:', e);  // ADD THIS
           reject(new Error('Failed to parse OpenAI response'));
         }
       });
     });
 
-    req.on('error', (err) => {
-      console.error('❌ HTTPS request failed:', err);  // ADD THIS
-      reject(err);
-    });
+    req.on('error', (err) => reject(err));
     req.write(body);
     req.end();
   });
 }
 
-/**
- * Build the AI assistant reply using conversation history + graph context.
- */
-async function buildAssistantReplyAI({ userName, userText, moodLabel, userMessageCount, allMessages, graphEvents }) {
-  console.log('🔧 Inside buildAssistantReplyAI, userText:', userText);
+async function buildAssistantReplyAI({ userName, userText, moodLabel, userMessageCount, allMessages, knowledgeContext }) {
   const text = userText.toLowerCase();
-  const userWantsToEnd = /\b(bye|good night|end|wrap up|done for today|stop)\b/.test(text);
-
-  if (userWantsToEnd) {
+  if (/\b(bye|good night|end|wrap up|done|stop)\b/.test(text)) {
     return {
-      reply: `No problem. I can close today's chat now. Click "End today's conversation" when you are ready.`,
+      reply: `No problem. Click "End today's conversation" when ready.`,
       promptToEnd: true,
     };
   }
 
-  // Build graph context string (most recent / highest importance first)
-  const graphContext = graphEvents.length > 0
-    ? graphEvents
-        .sort((a, b) => b.importance - a.importance)
-        .slice(0, 15)
-        .map(e => `- [${e.domains}] ${e.summary} (${e.emotional_tone}, importance ${e.importance}/5, ${e.event_date})`)
-        .join('\n')
-    : 'No past events recorded yet.';
+  const history = allMessages.slice(-12).map(m => ({
+    role: m.sender === 'user' ? 'user' : 'assistant',
+    content: m.content
+  }));
 
-  // Build conversation history for OpenAI (exclude the very first seed prompt if empty)
-  const history = allMessages
-    .slice(-12) // last 12 messages for context window efficiency
-    .map(m => ({ role: m.sender === 'user' ? 'user' : 'assistant', content: m.content }));
+  const systemPrompt = `You are Lifemap, a warm AI diary companion for ${userName}.
 
-  const systemPrompt = `You are a warm, empathetic AI diary companion named Lifemap. You help ${userName} reflect on their day.
+Personality: caring, non-judgmental, ask one focused question per reply, keep to 2-3 sentences.
+Current mood: ${moodLabel}
 
-Your personality:
-- Caring and non-judgmental
-- Ask one focused follow-up question per reply
-- Keep replies to 2–3 sentences max
-- Reference past life events naturally when relevant (don't force it)
-- If mood is tough/low, be extra gentle
+${userName}'s memories:
+${knowledgeContext || 'No past memories yet.'}
 
-Current mood detected: ${moodLabel}
+Suggest ending if ${userMessageCount} >= 6 messages.`;
 
-${userName}'s past life events (from their personal graph):
-${graphContext}
-
-If the user has sent ${userMessageCount} or more messages and seems to be wrapping up, you can gently offer to end the session. Always suggest ending if they've sent 6+ messages.`;
-
-  const messages = [
+  const reply = await callOpenAI([
     { role: 'system', content: systemPrompt },
     ...history,
-  ];
+  ], 0.75, 300);
 
-  const reply = await callOpenAI(messages, 0.75, 300);
-  const promptToEnd = userMessageCount >= 5;
-
-  return { reply, promptToEnd };
+  return { reply, promptToEnd: userMessageCount >= 5 };
 }
 
-/**
- * Extract structured life events from a conversation using OpenAI,
- * then persist them to the graph_events table.
- */
-async function extractEventsFromConversation(allMessages, userId, date) {
-  const conversation = allMessages
-    .map(m => `${m.sender.toUpperCase()}: ${m.content}`)
-    .join('\n');
+async function extractKnowledgeGraphFromConversation(sessionMessages, userId, date) {
+  const conversation = sessionMessages.map(m => `${m.sender.toUpperCase()}: ${m.content}`).join('\n');
 
-  const systemPrompt = `You are a life event extractor for a personal diary app.
-Analyze the conversation and extract ALL distinct life events the user mentioned.
-Return ONLY a valid JSON array with no extra text, markdown, or code fences.
+  const systemPrompt = `You are a knowledge graph extractor for a personal diary app.
 
-Each item must have exactly these fields:
+CRITICAL: Extract ALL distinct events, entities, and relationships from this conversation.
+Do NOT summarize or combine events - extract each one separately.
+
+Return ONLY valid JSON (no markdown, no code fences, no preamble):
 {
-  "summary": "one sentence describing the event",
-  "domains": ["one or more of: Work Life, Academic Life, Personal Life, Friends, Dating, Health, Family"],
-  "emotional_tone": "one of: positive, negative, neutral, stressed, anxious, happy, sad, grateful, excited",
-  "importance": <integer 1–5>,
-  "keywords": ["keyword1", "keyword2"]
-}`;
+  "entities": [
+    {"id": "e1", "type": "place|person|food|activity|preference|object|organization", "name": "entity name", "attributes": {"key": "value"}},
+    {"id": "e2", "type": "...", "name": "...", "attributes": {}}
+  ],
+  "events": [
+    {"id": "ev1", "summary": "one sentence describing what happened", "event_type": "travel|dining|meeting|accomplishment|experience|social|health|work|study", "domains": ["Personal Life"], "emotional_tone": "happy|excited|neutral|stressed|anxious|sad|grateful|proud", "importance": 3, "related_entities": ["e1", "e2"], "keywords": ["keyword1", "keyword2"]},
+    {"id": "ev2", "summary": "...", "event_type": "...", "domains": ["Work Life"], "emotional_tone": "...", "importance": 4, "related_entities": ["e3"], "keywords": ["..."]}
+  ],
+  "relationships": [
+    {"from_id": "ev1", "to_id": "e1", "relationship_type": "visited|ate|met|accomplished|experienced|enjoyed|located_in|part_of|prefers", "strength": 5},
+    {"from_id": "ev2", "to_id": "ev1", "relationship_type": "followed_by|caused_by|related_to", "strength": 3}
+  ]
+}
 
-  const raw = await callOpenAI(
-    [
-      { role: 'system', content: systemPrompt },
-      { role: 'user', content: `Extract events from this diary conversation:\n\n${conversation}` },
-    ],
-    0.0,
-    800
-  );
+EXAMPLES:
 
-  // Parse JSON — strip any accidental markdown fences
-  const start = raw.indexOf('[');
-  const end = raw.lastIndexOf(']') + 1;
-  if (start === -1 || end === 0) return [];
+Input: "I went to Chongqing and loved the xiaomian! Then I visited the Hongya Cave."
+Output:
+{
+  "entities": [
+    {"id": "e1", "type": "place", "name": "Chongqing", "attributes": {"country": "China"}},
+    {"id": "e2", "type": "food", "name": "Chongqing xiaomian", "attributes": {"cuisine": "Sichuanese"}},
+    {"id": "e3", "type": "place", "name": "Hongya Cave", "attributes": {"type": "tourist attraction"}},
+    {"id": "e4", "type": "preference", "name": "spicy food", "attributes": {}}
+  ],
+  "events": [
+    {"id": "ev1", "summary": "User traveled to Chongqing", "event_type": "travel", "domains": ["Personal Life"], "emotional_tone": "excited", "importance": 4, "related_entities": ["e1"], "keywords": ["travel", "China"]},
+    {"id": "ev2", "summary": "User ate Chongqing xiaomian", "event_type": "dining", "domains": ["Personal Life"], "emotional_tone": "happy", "importance": 3, "related_entities": ["e2", "e1"], "keywords": ["food", "xiaomian"]},
+    {"id": "ev3", "summary": "User visited Hongya Cave", "event_type": "experience", "domains": ["Personal Life"], "emotional_tone": "excited", "importance": 3, "related_entities": ["e3", "e1"], "keywords": ["tourism", "sightseeing"]}
+  ],
+  "relationships": [
+    {"from_id": "ev1", "to_id": "e1", "relationship_type": "visited", "strength": 5},
+    {"from_id": "ev2", "to_id": "e2", "relationship_type": "ate", "strength": 5},
+    {"from_id": "ev2", "to_id": "ev1", "relationship_type": "part_of", "strength": 5},
+    {"from_id": "ev3", "to_id": "e3", "relationship_type": "visited", "strength": 5},
+    {"from_id": "ev3", "to_id": "ev1", "relationship_type": "part_of", "strength": 5},
+    {"from_id": "e2", "to_id": "e1", "relationship_type": "located_in", "strength": 5},
+    {"from_id": "e3", "to_id": "e1", "relationship_type": "located_in", "strength": 5},
+    {"from_id": "user", "to_id": "e4", "relationship_type": "prefers", "strength": 4},
+    {"from_id": "e2", "to_id": "e4", "relationship_type": "is_type_of", "strength": 5}
+  ]
+}
 
-  const events = JSON.parse(raw.slice(start, end));
-  const saved = [];
+REMEMBER:
+- Extract EVERY distinct event separately (don't combine "went to X and did Y" into one event - make it two!)
+- Include all entities mentioned (places, people, foods, activities, preferences)
+- Create relationships between events (temporal, causal, part-of)
+- Create relationships between entities and events
+- Be thorough - missing events means losing memories!`;
 
-  for (const ev of events) {
-    // Validate and sanitize domains
-    const domains = (ev.domains || [])
-      .filter(d => ALLOWED_DOMAINS.includes(d));
-    if (domains.length === 0) domains.push('Personal Life');
+  console.log('🤖 Calling OpenAI for knowledge graph extraction...');
+  console.log('📝 Conversation length:', conversation.length, 'characters');
 
-    const row = db.prepare(
-      `INSERT INTO graph_events
-        (user_id, event_date, summary, domains, emotional_tone, importance, keywords, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+  const raw = await callOpenAI([
+    { role: 'system', content: systemPrompt },
+    { role: 'user', content: `Extract knowledge graph from this diary conversation:\n\n${conversation}` },
+  ], 0.1, 3000);
+
+  console.log('📦 Raw OpenAI response:', raw.substring(0, 300));
+
+  const start = raw.indexOf('{');
+  const end = raw.lastIndexOf('}') + 1;
+  if (start === -1) {
+    console.log('⚠️ No JSON found in response');
+    return { entities: [], events: [], relationships: [] };
+  }
+
+  const graph = JSON.parse(raw.slice(start, end));
+  
+  console.log(`🎯 Extracted: ${graph.entities?.length || 0} entities, ${graph.events?.length || 0} events, ${graph.relationships?.length || 0} relationships`);
+  
+  await saveKnowledgeGraph(graph, userId, date);
+  return graph;
+}
+
+async function saveKnowledgeGraph(graph, userId, date) {
+  const { entities = [], events = [], relationships = [] } = graph;
+
+  console.log(`💾 Saving ${entities.length} entities, ${events.length} events, ${relationships.length} relationships`);
+
+  // Map AI IDs to database IDs
+  const entityIdMap = {};
+  const eventIdMap = {};
+
+  // Save entities
+  for (const entity of entities) {
+    const result = db.prepare(
+      `INSERT OR REPLACE INTO kg_entities (user_id, entity_id, entity_type, name, attributes, created_at)
+       VALUES (?, ?, ?, ?, ?, ?)`
+    ).run(
+      userId,
+      entity.id,
+      entity.type,
+      entity.name,
+      JSON.stringify(entity.attributes || {}),
+      nowIso()
+    );
+    entityIdMap[entity.id] = `entity:${result.lastInsertRowid}`;
+    console.log(`  💾 Entity saved: ${entity.name} (DB ID: ${result.lastInsertRowid})`);
+  }
+
+  // Save events - using auto-increment, no unique constraint on event_id
+  for (const event of events) {
+    const result = db.prepare(
+      `INSERT INTO kg_events (user_id, event_date, summary, event_type, domains, emotional_tone, importance, related_entities, keywords, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
       userId,
       date,
-      String(ev.summary || '').slice(0, 500),
-      JSON.stringify(domains),
-      String(ev.emotional_tone || 'neutral'),
-      Math.min(5, Math.max(1, Number(ev.importance) || 3)),
-      JSON.stringify(ev.keywords || []),
+      event.summary,
+      event.event_type || 'general',
+      JSON.stringify(event.domains || ['Personal Life']),
+      event.emotional_tone || 'neutral',
+      event.importance || 3,
+      JSON.stringify(event.related_entities || []),
+      JSON.stringify(event.keywords || []),
       nowIso()
     );
-
-    saved.push({ id: row.lastInsertRowid, ...ev, domains, event_date: date });
+    eventIdMap[event.id] = `event:${result.lastInsertRowid}`;
+    console.log(`  💾 Event saved: ${event.summary.substring(0, 50)}... (DB ID: ${result.lastInsertRowid})`);
   }
 
-  return saved;
+  // Save relationships - map AI IDs to DB IDs
+  for (const rel of relationships) {
+    const fromId = eventIdMap[rel.from_id] || entityIdMap[rel.from_id] || rel.from_id;
+    const toId = eventIdMap[rel.to_id] || entityIdMap[rel.to_id] || rel.to_id;
+
+    db.prepare(
+      `INSERT INTO kg_relationships (user_id, from_id, to_id, relationship_type, strength, created_at)
+       VALUES (?, ?, ?, ?, ?, ?)`
+    ).run(userId, fromId, toId, rel.relationship_type, rel.strength || 3, nowIso());
+    
+    console.log(`  💾 Relationship: ${fromId} --[${rel.relationship_type}]--> ${toId}`);
+  }
+
+  console.log(`✅ Saved ${entities.length} entities, ${events.length} events, ${relationships.length} relationships`);
 }
 
-// ═════════════════════════════════════════════════════════════════════════════
-// GRAPH HELPERS
-// ═════════════════════════════════════════════════════════════════════════════
+function getRelevantKnowledgeContext(userId, query) {
+  const keywords = query.toLowerCase().split(/\s+/).filter(w => w.length > 3);
+  if (!keywords.length) return '';
 
-function getGraphEvents(userId) {
-  const rows = db
-    .prepare('SELECT * FROM graph_events WHERE user_id = ? ORDER BY created_at ASC')
-    .all(userId);
+  const placeholders = keywords.map(() => 'LOWER(name) LIKE ?').join(' OR ');
+  const entities = db.prepare(
+    `SELECT * FROM kg_entities WHERE user_id = ? AND (${placeholders}) LIMIT 10`
+  ).all(userId, ...keywords.map(k => `%${k}%`));
 
-  return rows.map(r => ({
+  if (!entities.length) return '';
+
+  let context = '';
+  for (const entity of entities) {
+    const events = db.prepare(
+      `SELECT * FROM kg_events WHERE user_id = ? AND related_entities LIKE ? ORDER BY event_date DESC LIMIT 3`
+    ).all(userId, `%${entity.entity_id}%`);
+
+    if (events.length) {
+      context += `\n📍 ${entity.name}:\n`;
+      for (const event of events) {
+        context += `  - ${event.summary} (${event.event_date})\n`;
+      }
+    }
+  }
+  return context;
+}
+
+function getKnowledgeGraphEvents(userId) {
+  return db.prepare('SELECT * FROM kg_events WHERE user_id = ? ORDER BY created_at ASC').all(userId).map(r => ({
     ...r,
     domains: safeJsonParse(r.domains, ['Personal Life']),
     keywords: safeJsonParse(r.keywords, []),
+    related_entities: safeJsonParse(r.related_entities, []),
   }));
 }
 
-/**
- * Build node list for the graph:
- * - 7 fixed domain hub nodes
- * - one event node per graph_event row
- */
-function buildGraphNodes(events) {
+function getKnowledgeGraphEntities(userId) {
+  return db.prepare('SELECT * FROM kg_entities WHERE user_id = ? ORDER BY created_at ASC').all(userId).map(r => ({
+    ...r,
+    attributes: safeJsonParse(r.attributes, {}),
+  }));
+}
+
+function getKnowledgeGraphRelationships(userId) {
+  return db.prepare('SELECT * FROM kg_relationships WHERE user_id = ? ORDER BY created_at ASC').all(userId);
+}
+
+function buildGraphNodes(events, entities) {
   const domainMeta = {
-    'Work Life':      { color: '#E8A838', icon: '💼' },
-    'Academic Life':  { color: '#4A90D9', icon: '📚' },
-    'Personal Life':  { color: '#9B59B6', icon: '🌸' },
-    'Friends':        { color: '#2ECC71', icon: '🤝' },
-    'Dating':         { color: '#E74C3C', icon: '💕' },
-    'Health':         { color: '#1ABC9C', icon: '🏃' },
-    'Family':         { color: '#F39C12', icon: '🏡' },
+    'Work Life': { color: '#E8A838', icon: '💼' },
+    'Academic Life': { color: '#4A90D9', icon: '📚' },
+    'Personal Life': { color: '#9B59B6', icon: '🌸' },
+    'Friends': { color: '#2ECC71', icon: '🤝' },
+    'Dating': { color: '#E74C3C', icon: '💕' },
+    'Health': { color: '#1ABC9C', icon: '🏃' },
+    'Family': { color: '#F39C12', icon: '🏡' },
+  };
+
+  const entityTypeMeta = {
+    'place': { color: '#3498db', icon: '📍' },
+    'person': { color: '#e74c3c', icon: '👤' },
+    'food': { color: '#f39c12', icon: '🍜' },
+    'activity': { color: '#9b59b6', icon: '⚡' },
+    'preference': { color: '#1abc9c', icon: '❤️' },
+    'object': { color: '#95a5a6', icon: '📦' },
+    'organization': { color: '#34495e', icon: '🏢' },
   };
 
   const domainNodes = ALLOWED_DOMAINS.map(d => ({
-    id: `domain:${d}`,
-    type: 'domain',
+    id: `domain:${d}`, 
+    type: 'domain', 
     label: d,
-    color: domainMeta[d]?.color || '#888',
+    color: domainMeta[d]?.color || '#888', 
     icon: domainMeta[d]?.icon || '●',
   }));
 
   const eventNodes = events.map(ev => ({
-    id: `event:${ev.id}`,
-    type: 'event',
-    dbId: ev.id,
+    id: `event:${ev.id}`, 
+    type: 'event', 
+    dbId: ev.id, 
     summary: ev.summary,
-    domains: ev.domains,
-    emotional_tone: ev.emotional_tone,
+    domains: ev.domains, 
+    emotional_tone: ev.emotional_tone, 
     importance: ev.importance,
-    keywords: ev.keywords,
-    event_date: ev.event_date,
+    keywords: ev.keywords, 
+    event_date: ev.event_date, 
     createdAt: ev.created_at,
   }));
 
-  return [...domainNodes, ...eventNodes];
+  const entityNodes = entities.map(entity => ({
+    id: `entity:${entity.id}`,
+    type: 'entity',
+    entityType: entity.entity_type,
+    name: entity.name,
+    attributes: entity.attributes,
+    color: entityTypeMeta[entity.entity_type]?.color || '#95a5a6',
+    icon: entityTypeMeta[entity.entity_type]?.icon || '⭐',
+  }));
+
+  console.log(`📊 Built ${domainNodes.length} domain nodes, ${eventNodes.length} event nodes, ${entityNodes.length} entity nodes`);
+
+  return [...domainNodes, ...eventNodes, ...entityNodes];
 }
 
-/**
- * Build edge list:
- * - event → domain (BELONGS_TO) for each domain the event is tagged with
- * - event → previous event in same domain (FOLLOWS) for temporal chain
- */
-function buildGraphEdges(events) {
+function buildGraphEdges(events, relationships) {
   const edges = [];
   const lastEventPerDomain = {};
 
+  // Add edges from kg_relationships table (the connections we want!)
+  for (const rel of relationships) {
+    edges.push({
+      source: rel.from_id,
+      target: rel.to_id,
+      type: rel.relationship_type.toUpperCase().replace(/_/g, ' '),
+      strength: rel.strength,
+    });
+  }
+
+  // Add edges from events to domains
   for (const ev of events) {
     for (const domain of ev.domains) {
-      // BELONGS_TO edge
-      edges.push({
-        source: `event:${ev.id}`,
-        target: `domain:${domain}`,
-        type: 'BELONGS_TO',
+      edges.push({ 
+        source: `event:${ev.id}`, 
+        target: `domain:${domain}`, 
+        type: 'BELONGS TO' 
       });
-
-      // FOLLOWS edge (temporal continuity within same domain)
-      if (lastEventPerDomain[domain] !== undefined) {
-        edges.push({
-          source: `event:${ev.id}`,
-          target: `event:${lastEventPerDomain[domain]}`,
-          type: 'FOLLOWS',
+      
+      // Temporal continuity within same domain
+      if (lastEventPerDomain[domain]) {
+        edges.push({ 
+          source: `event:${ev.id}`, 
+          target: `event:${lastEventPerDomain[domain]}`, 
+          type: 'FOLLOWS' 
         });
       }
       lastEventPerDomain[domain] = ev.id;
     }
   }
 
+  console.log(`📊 Built ${edges.length} edges (${relationships.length} from relationships, ${edges.length - relationships.length} domain/temporal)`);
+
   return edges;
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// DATABASE SCHEMA
+// SCHEMA
 // ═════════════════════════════════════════════════════════════════════════════
 
 function initSchema() {
@@ -663,139 +838,89 @@ function initSchema() {
       FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
     );
 
-    CREATE TABLE IF NOT EXISTS messages (
+    CREATE TABLE IF NOT EXISTS kg_entities (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
-      conversation_id INTEGER NOT NULL,
-      sender TEXT NOT NULL CHECK(sender IN ('assistant', 'user')),
-      content TEXT NOT NULL,
-      mood_label TEXT,
-      mood_score REAL,
+      user_id TEXT NOT NULL,
+      entity_id TEXT NOT NULL,
+      entity_type TEXT NOT NULL,
+      name TEXT NOT NULL,
+      attributes TEXT,
       created_at TEXT NOT NULL,
-      FOREIGN KEY(conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+      UNIQUE(user_id, entity_id),
+      FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
     );
 
-    CREATE TABLE IF NOT EXISTS graph_events (
+    CREATE TABLE IF NOT EXISTS kg_events (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       user_id TEXT NOT NULL,
       event_date TEXT NOT NULL,
       summary TEXT NOT NULL,
-      domains TEXT NOT NULL DEFAULT '["Personal Life"]',
-      emotional_tone TEXT NOT NULL DEFAULT 'neutral',
-      importance INTEGER NOT NULL DEFAULT 3,
-      keywords TEXT NOT NULL DEFAULT '[]',
+      event_type TEXT,
+      domains TEXT NOT NULL,
+      emotional_tone TEXT,
+      importance INTEGER,
+      related_entities TEXT,
+      keywords TEXT,
+      created_at TEXT NOT NULL,
+      FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS kg_relationships (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id TEXT NOT NULL,
+      from_id TEXT NOT NULL,
+      to_id TEXT NOT NULL,
+      relationship_type TEXT NOT NULL,
+      strength INTEGER,
       created_at TEXT NOT NULL,
       FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
     );
 
     CREATE INDEX IF NOT EXISTS idx_conversations_user_date ON conversations(user_id, date);
-    CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id, created_at);
-    CREATE INDEX IF NOT EXISTS idx_graph_events_user ON graph_events(user_id, event_date);
+    CREATE INDEX IF NOT EXISTS idx_kg_entities_user ON kg_entities(user_id, entity_type);
+    CREATE INDEX IF NOT EXISTS idx_kg_events_user ON kg_events(user_id, event_date);
+    CREATE INDEX IF NOT EXISTS idx_kg_relationships_from ON kg_relationships(user_id, from_id);
+    CREATE INDEX IF NOT EXISTS idx_kg_relationships_to ON kg_relationships(user_id, to_id);
   `);
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// ORIGINAL HELPER FUNCTIONS (unchanged from your friend's code)
+// UTILITIES
 // ═════════════════════════════════════════════════════════════════════════════
 
 function nowIso() { return dayjs().toISOString(); }
 function todayDate() { return dayjs().format('YYYY-MM-DD'); }
-
-function safeUserId(value) {
-  const userId = String(value || '').trim();
-  return userId ? userId.slice(0, 64) : 'default-user';
-}
-
-function normalizeName(value) {
-  const name = String(value || '').trim();
-  return name ? name.slice(0, 40) : DEFAULT_NAME;
-}
-
+function safeUserId(value) { return String(value || '').trim().slice(0, 64) || 'default-user'; }
+function normalizeName(value) { return String(value || '').trim().slice(0, 40) || DEFAULT_NAME; }
 function normalizeCheckInTime(value) {
   const candidate = String(value || '').trim();
   return /^([01]\d|2[0-3]):([0-5]\d)$/.test(candidate) ? candidate : DEFAULT_CHECK_IN_TIME;
 }
-
 function normalizeDate(value) {
   const candidate = String(value || '').trim();
-  if (!candidate) return todayDate();
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(candidate)) return todayDate();
+  if (!candidate || !/^\d{4}-\d{2}-\d{2}$/.test(candidate)) return todayDate();
   const parsed = dayjs(candidate);
   return parsed.isValid() ? parsed.format('YYYY-MM-DD') : todayDate();
 }
-
 function clampDays(value) {
   const raw = Number(value);
-  if (Number.isNaN(raw)) return 30;
-  return Math.max(7, Math.min(120, Math.trunc(raw)));
+  return Number.isNaN(raw) ? 30 : Math.max(7, Math.min(120, Math.trunc(raw)));
 }
-
-function getUser(userId) {
-  return db.prepare('SELECT * FROM users WHERE id = ?').get(userId);
-}
-
+function getUser(userId) { return db.prepare('SELECT * FROM users WHERE id = ?').get(userId); }
 function ensureUser(userId) {
   const existing = getUser(userId);
   if (existing) return existing;
   const timestamp = nowIso();
-  db.prepare(
-    `INSERT INTO users (id, name, check_in_time, created_at, updated_at) VALUES (?, ?, ?, ?, ?)`
-  ).run(userId, DEFAULT_NAME, DEFAULT_CHECK_IN_TIME, timestamp, timestamp);
+  db.prepare(`INSERT INTO users (id, name, check_in_time, created_at, updated_at) VALUES (?, ?, ?, ?, ?)`).run(userId, DEFAULT_NAME, DEFAULT_CHECK_IN_TIME, timestamp, timestamp);
   return getUser(userId);
 }
-
 function ensureConversation(userId, date) {
   const timestamp = nowIso();
-  db.prepare(
-    `INSERT INTO conversations (user_id, date, mood_label, mood_score, is_ended, started_at, created_at, updated_at)
-      VALUES (?, ?, 'neutral', 0, 0, ?, ?, ?)
-      ON CONFLICT(user_id, date) DO NOTHING`
-  ).run(userId, date, timestamp, timestamp, timestamp);
+  db.prepare(`INSERT INTO conversations (user_id, date, mood_label, mood_score, is_ended, started_at, created_at, updated_at) VALUES (?, ?, 'neutral', 0, 0, ?, ?, ?) ON CONFLICT(user_id, date) DO NOTHING`).run(userId, date, timestamp, timestamp, timestamp);
 }
-
 function getConversation(userId, date) {
-  return db.prepare(
-    `SELECT c.*,
-        COALESCE(SUM(CASE WHEN m.sender = 'user' THEN 1 ELSE 0 END), 0) AS user_message_count,
-        COALESCE(SUM(CASE WHEN m.sender = 'assistant' THEN 1 ELSE 0 END), 0) AS assistant_message_count
-      FROM conversations c
-      LEFT JOIN messages m ON m.conversation_id = c.id
-      WHERE c.user_id = ? AND c.date = ?
-      GROUP BY c.id`
-  ).get(userId, date);
+  return db.prepare(`SELECT * FROM conversations WHERE user_id = ? AND date = ?`).get(userId, date);
 }
-
-function getMessages(conversationId) {
-  return db.prepare(
-    `SELECT id, conversation_id, sender, content, mood_label, mood_score, created_at
-      FROM messages WHERE conversation_id = ? ORDER BY id ASC`
-  ).all(conversationId);
-}
-
-function insertMessage(conversationId, sender, content, mood) {
-  db.prepare(
-    `INSERT INTO messages (conversation_id, sender, content, mood_label, mood_score, created_at)
-      VALUES (?, ?, ?, ?, ?, ?)`
-  ).run(conversationId, sender, content, mood?.label || null, mood?.score ?? null, nowIso());
-  db.prepare('UPDATE conversations SET updated_at = ? WHERE id = ?').run(nowIso(), conversationId);
-}
-
-function maybeSeedCheckInPrompt(user, conversation, date, forcePrompt) {
-  const totalMessages =
-    Number(conversation.user_message_count) + Number(conversation.assistant_message_count);
-  if (totalMessages > 0 || conversation.is_ended) return;
-
-  const shouldPrompt = forcePrompt || (date === todayDate() && hasReachedCheckInTime(user.check_in_time));
-  if (!shouldPrompt) return;
-
-  insertMessage(conversation.id, 'assistant', `Hi ${user.name}, how was your day?`, null);
-}
-
-function hasReachedCheckInTime(checkInTime) {
-  const [hour, minute] = checkInTime.split(':').map(Number);
-  const now = dayjs();
-  return now.hour() * 60 + now.minute() >= hour * 60 + minute;
-}
-
 function analyzeMood(text) {
   const lowerText = text.toLowerCase();
   const words = lowerText.split(/[^a-z]+/).filter(Boolean);
@@ -804,12 +929,9 @@ function analyzeMood(text) {
     if (POSITIVE_WORDS.has(word)) score += 1;
     if (NEGATIVE_WORDS.has(word)) score -= 1;
   }
-  if (/not good|rough day|bad day|too much|so tired|burned out|burnt out/.test(lowerText)) score -= 1;
-  if (/really good|great day|feeling better|pretty happy|very productive/.test(lowerText)) score += 1;
   score = Math.max(-2, Math.min(2, score));
   return { score, label: moodLabelFromScore(score) };
 }
-
 function moodLabelFromScore(score) {
   if (score >= 1.5) return 'great';
   if (score >= 0.5) return 'good';
@@ -817,99 +939,31 @@ function moodLabelFromScore(score) {
   if (score <= -0.5) return 'low';
   return 'neutral';
 }
-
-function updateConversationMood(conversationId) {
-  const aggregate = db.prepare(
-    `SELECT AVG(mood_score) AS average_score, COUNT(*) AS entries
-      FROM messages WHERE conversation_id = ? AND sender = 'user' AND mood_score IS NOT NULL`
-  ).get(conversationId);
-
-  const averageScore = aggregate.entries ? Number(aggregate.average_score) : 0;
-  db.prepare(
-    `UPDATE conversations SET mood_score = ?, mood_label = ?, updated_at = ? WHERE id = ?`
-  ).run(averageScore, moodLabelFromScore(averageScore), nowIso(), conversationId);
-}
-
-// Fallback template reply (used when OpenAI is unavailable)
 function buildAssistantReplyTemplate({ userName, userText, moodLabel, userMessageCount }) {
   const text = userText.toLowerCase();
-  const userWantsToEnd = /\b(bye|good night|end|wrap up|done for today|stop)\b/.test(text);
-
-  let reply = '';
-  if (moodLabel === 'tough') {
-    reply = pick([
-      `That sounds really heavy, ${userName}. Thanks for sharing it with me. What felt hardest today?`,
-      `I hear you, ${userName}. Tough days can drain you fast. Want to unpack one part of it together?`,
-    ]);
-  } else if (moodLabel === 'low') {
-    reply = pick([
-      `Thanks for telling me, ${userName}. What was one moment that pulled your energy down today?`,
-      `Got it. Even a low day is worth checking in on. What happened that stood out the most?`,
-    ]);
-  } else if (moodLabel === 'great') {
-    reply = pick([
-      `Love that energy, ${userName}. What was the best moment of your day?`,
-      `That is awesome to hear. What do you want to carry into tomorrow from today?`,
-    ]);
-  } else if (moodLabel === 'good') {
-    reply = pick([
-      `Nice. Sounds like a solid day, ${userName}. What made it go well?`,
-      `Good to hear. Want to lock in one small win from today?`,
-    ]);
-  } else {
-    reply = pick([
-      `Thanks for checking in, ${userName}. What was the most memorable part of your day?`,
-      `I am here with you. What happened today that you want to reflect on?`,
-    ]);
+  if (/\b(bye|good night|end|wrap up|done|stop)\b/.test(text)) {
+    return { reply: `No problem. Click "End today's conversation" when ready.`, promptToEnd: true };
   }
-
-  if (userWantsToEnd) {
-    return { reply: `No problem. I can close today's chat now. Click "End today's conversation" when you are ready.`, promptToEnd: true };
-  }
-
-  if (userMessageCount >= 4) {
-    return { reply: `${reply} If you are ready, I can also help you wrap up this conversation for today.`, promptToEnd: true };
-  }
-
-  return { reply, promptToEnd: false };
+  const replies = {
+    tough: [`That sounds heavy, ${userName}. What felt hardest?`],
+    low: [`Thanks for sharing, ${userName}. What pulled your energy down?`],
+    great: [`Love that energy! What was the best moment?`],
+    good: [`Nice. What made it go well?`],
+    neutral: [`Thanks for checking in. What stood out today?`],
+  };
+  return { reply: pick(replies[moodLabel] || replies.neutral), promptToEnd: userMessageCount >= 4 };
 }
-
 function buildInsights(summary, moodBreakdown) {
-  if (summary.totalTrackedDays === 0) {
-    return ['No logs yet. Start your first daily check-in to populate the dashboard.'];
-  }
-
+  if (!summary.totalTrackedDays) return ['Start your first check-in.'];
   const insights = [];
-
-  if (summary.averageMoodScore <= -0.5) {
-    insights.push('Recent mood trend is below neutral. Consider shorter daily check-ins with recovery goals.');
-  } else if (summary.averageMoodScore >= 0.5) {
-    insights.push('Recent mood trend is positive. Keep repeating routines linked to better days.');
-  } else {
-    insights.push('Mood trend is stable. Adding detail in messages can improve pattern detection.');
-  }
-
-  if (summary.completionRate < 60) {
-    insights.push('Many conversations stay open. Ending each day gives cleaner mood analytics.');
-  } else {
-    insights.push('Conversation completion is strong. Your data quality for trends is improving.');
-  }
-
-  if (moodBreakdown.tough >= 3) {
-    insights.push('Multiple tough days were detected. It may help to set smaller next-day goals.');
-  }
-
-  if (summary.streakDays >= 3) {
-    insights.push(`You are on a ${summary.streakDays}-day check-in streak.`);
-  }
-
+  if (summary.averageMoodScore <= -0.5) insights.push('Recent mood below neutral.');
+  else if (summary.averageMoodScore >= 0.5) insights.push('Recent mood positive.');
+  if (summary.streakDays >= 3) insights.push(`${summary.streakDays}-day streak.`);
   return insights.slice(0, 3);
 }
-
 function computeRecentStreak(rows) {
   if (!rows.length) return 0;
-  let streak = 1;
-  let prevDate = dayjs(rows[0].date);
+  let streak = 1, prevDate = dayjs(rows[0].date);
   for (let i = 1; i < rows.length; i++) {
     const curr = dayjs(rows[i].date);
     if (prevDate.diff(curr, 'day') === 1) { streak++; prevDate = curr; }
@@ -917,33 +971,14 @@ function computeRecentStreak(rows) {
   }
   return streak;
 }
-
-function pick(list) {
-  return list[Math.floor(Math.random() * list.length)];
-}
-
-function safeJsonParse(value, fallback) {
-  try { return JSON.parse(value); } catch { return fallback; }
-}
-
-function mapUser(row) {
-  return { id: row.id, name: row.name, checkInTime: row.check_in_time, createdAt: row.created_at, updatedAt: row.updated_at };
-}
-
+function pick(list) { return list[Math.floor(Math.random() * list.length)]; }
+function safeJsonParse(value, fallback) { try { return JSON.parse(value); } catch { return fallback; } }
+function mapUser(row) { return { id: row.id, name: row.name, checkInTime: row.check_in_time, createdAt: row.created_at, updatedAt: row.updated_at }; }
 function mapConversation(row) {
   return {
-    id: row.id, userId: row.user_id, date: row.date,
-    moodLabel: row.mood_label, moodScore: Number(Number(row.mood_score || 0).toFixed(2)),
-    isEnded: Boolean(row.is_ended), startedAt: row.started_at, endedAt: row.ended_at,
-    updatedAt: row.updated_at,
-    userMessageCount: Number(row.user_message_count || 0),
-    assistantMessageCount: Number(row.assistant_message_count || 0),
-  };
-}
-
-function mapMessage(row) {
-  return {
-    id: row.id, conversationId: row.conversation_id, sender: row.sender,
-    content: row.content, moodLabel: row.mood_label, moodScore: row.mood_score, createdAt: row.created_at,
+    id: row.id, userId: row.user_id, date: row.date, moodLabel: row.mood_label,
+    moodScore: Number(row.mood_score.toFixed(2)), isEnded: Boolean(row.is_ended),
+    startedAt: row.started_at, endedAt: row.ended_at, updatedAt: row.updated_at,
+    userMessageCount: 0, assistantMessageCount: 0,
   };
 }

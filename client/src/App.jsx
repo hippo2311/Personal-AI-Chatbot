@@ -1343,56 +1343,76 @@ function MainApp({ authUser, onLogout }) {
     }
   };
 
-  const endConversation = () => {
-    if (conversation.ended || !conversationsLoaded) {
-      return;
+const endConversation = async () => {
+  if (conversation.ended || !conversationsLoaded) {
+    return;
+  }
+
+  const activeUserId = db.activeUserId;
+  const userSnapshot = db.users[activeUserId];
+  if (!activeUserId || !userSnapshot) {
+    return;
+  }
+
+  const profile = userSnapshot.profile || buildDefaultProfile();
+  const { conversation: draftConversation, dateKey, sequenceNumber } = buildConversationDraft(
+    userSnapshot,
+    chatDate
+  );
+
+  draftConversation.date = dateKey;
+  draftConversation.startDate = dateKey;
+  draftConversation.sequenceNumber = sequenceNumber;
+  draftConversation.ended = true;
+  draftConversation.endedAt = new Date().toISOString();
+  draftConversation.messages.push({
+    id: randomId(),
+    sender: 'assistant',
+    text: `Nice check-in today, ${profile.name}. I will ask again at ${profile.checkInTime} tomorrow.`,
+    moodLabel: null,
+    moodScore: null,
+    createdAt: new Date().toISOString(),
+  });
+
+  // Update local state
+  setDb((previous) => {
+    const next = clone(previous);
+    const user = next.users[next.activeUserId];
+    if (!user) {
+      return previous;
     }
+    user.conversations[dateKey] = draftConversation;
+    const sequences = user.conversationSequences || {};
+    sequences[dateKey] = Math.max(sequences[dateKey] || 0, draftConversation.sequenceNumber || 1);
+    user.conversationSequences = sequences;
+    next.users[next.activeUserId] = user;
+    return next;
+  });
 
-    const activeUserId = db.activeUserId;
-    const userSnapshot = db.users[activeUserId];
-    if (!activeUserId || !userSnapshot) {
-      return;
+  // CALL BACKEND API TO TRIGGER AUTO-EXTRACTION
+  try {
+    console.log('🔚 Calling backend to end conversation and extract events...');
+    const response = await fetch(`http://localhost:4000/api/chat/${activeUserId}/end-day`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ date: chatDate }),
+    });
+
+    if (!response.ok) {
+      console.error('❌ Backend end-day failed:', response.status);
+    } else {
+      console.log('✅ Backend end-day succeeded - events should be extracted');
     }
+  } catch (error) {
+    console.error('❌ Failed to call backend end-day:', error);
+  }
 
-    const profile = userSnapshot.profile || buildDefaultProfile();
-    const { conversation: draftConversation, dateKey, sequenceNumber } = buildConversationDraft(
-      userSnapshot,
-      chatDate
-    );
-
-    draftConversation.date = dateKey;
-    draftConversation.startDate = dateKey;
-    draftConversation.sequenceNumber = sequenceNumber;
-    draftConversation.ended = true;
-    draftConversation.endedAt = new Date().toISOString();
-    draftConversation.messages.push({
-      id: randomId(),
-      sender: 'assistant',
-      text: `Nice check-in today, ${profile.name}. I will ask again at ${profile.checkInTime} tomorrow.`,
-      moodLabel: null,
-      moodScore: null,
-      createdAt: new Date().toISOString(),
-    });
-
-    setDb((previous) => {
-      const next = clone(previous);
-      const user = next.users[next.activeUserId];
-      if (!user) {
-        return previous;
-      }
-      user.conversations[dateKey] = draftConversation;
-      const sequences = user.conversationSequences || {};
-      sequences[dateKey] = Math.max(sequences[dateKey] || 0, draftConversation.sequenceNumber || 1);
-      user.conversationSequences = sequences;
-      next.users[next.activeUserId] = user;
-      return next;
-    });
-
-    const conversationRef = getConversationDocumentRef(activeUserId, draftConversation.conversationId);
-    void setDoc(conversationRef, draftConversation).catch(() => {
-      setSyncError('Cannot close your conversation right now. Check database rules/permissions.');
-    });
-  };
+  // Save to Firestore
+  const conversationRef = getConversationDocumentRef(activeUserId, draftConversation.conversationId);
+  void setDoc(conversationRef, draftConversation).catch(() => {
+    setSyncError('Cannot close your conversation right now. Check database rules/permissions.');
+  });
+};
 
   const handleDiaryPhotoSelect = async (event) => {
     const files = Array.from(event.target.files || []);

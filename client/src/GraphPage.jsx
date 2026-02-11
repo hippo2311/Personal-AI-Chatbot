@@ -56,7 +56,32 @@ function GraphPage({ activeUser, formatDate, formatTime }) {
     setLoading(false);
   };
 
-  // Removed manual extraction - events are now auto-extracted when ending conversations
+  const extractEventsFromToday = async () => {
+    setExtracting(true);
+    setExtractMessage('');
+    setError('');
+    
+    const today = new Date().toISOString().slice(0, 10);
+    
+    try {
+      const response = await fetch(`http://localhost:4000/api/graph/${userId}/extract`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ date: today }),
+      });
+      
+      if (!response.ok) throw new Error('Failed to extract events');
+      
+      const data = await response.json();
+      setExtractMessage(`Extracted ${data.extracted} event${data.extracted !== 1 ? 's' : ''} from today's conversation.`);
+      
+      // Reload graph to show new events
+      await loadGraphData();
+    } catch (err) {
+      setError(err.message);
+    }
+    setExtracting(false);
+  };
 
   const deleteEvent = async (eventId) => {
     if (!window.confirm('Delete this event from your life graph?')) return;
@@ -73,30 +98,6 @@ function GraphPage({ activeUser, formatDate, formatTime }) {
     } catch (err) {
       setError(err.message);
     }
-  };
-
-  const clearAllEvents = async () => {
-    if (!window.confirm(`Delete all ${graphData.eventCount} events from your life graph? This cannot be undone.`)) return;
-    
-    setExtracting(true);
-    setError('');
-    setExtractMessage('');
-    
-    try {
-      const response = await fetch(`http://localhost:4000/api/graph/${userId}/clear`, {
-        method: 'DELETE',
-      });
-      
-      if (!response.ok) throw new Error('Failed to clear events');
-      
-      const data = await response.json();
-      setExtractMessage(`Cleared ${data.deleted} events from your life graph.`);
-      setSelectedNode(null);
-      await loadGraphData();
-    } catch (err) {
-      setError(err.message);
-    }
-    setExtracting(false);
   };
 
   // SVG pan/zoom handlers
@@ -169,16 +170,14 @@ function GraphPage({ activeUser, formatDate, formatTime }) {
         </div>
         
         <div className="graph-actions">
+          <button 
+            className="extract-btn" 
+            onClick={extractEventsFromToday}
+            disabled={extracting}
+          >
+            {extracting ? 'Extracting...' : '✨ Extract Events from Today'}
+          </button>
           <button className="refresh-btn" onClick={loadGraphData}>🔄 Refresh</button>
-          {graphData.eventCount > 0 && (
-            <button 
-              className="clear-all-btn" 
-              onClick={clearAllEvents}
-              disabled={extracting}
-            >
-              🗑️ Clear All Events
-            </button>
-          )}
         </div>
 
         {extractMessage && <p className="extract-message success">{extractMessage}</p>}

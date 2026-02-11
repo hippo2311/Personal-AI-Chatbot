@@ -598,12 +598,13 @@ function MainApp({ authUser, onLogout }) {
     const nextSequence = Number(sequences[safeDate] || 0) + 1;
     const conversationId = `${safeDate}-${String(nextSequence).padStart(2, '0')}`;
 
+    const newConversation = buildEmptyConversation(safeDate);
+    newConversation.conversationId = conversationId;
+    newConversation.sequenceNumber = nextSequence;
+    newConversation.startDate = safeDate;
+
     return {
-      conversation: buildEmptyConversation(safeDate, {
-        conversationId,
-        sequenceNumber: nextSequence,
-        startDate: safeDate,
-      }),
+      conversation: newConversation,
       dateKey: safeDate,
       conversationId,
       sequenceNumber: nextSequence,

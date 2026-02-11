@@ -100,7 +100,11 @@ OPENAI_API_KEY=sk-...
 
 ## Installation & Local Development
 
-Clone the repository, then set up each workspace individually.
+Download node.js from https://nodejs.org/en/download
+Download git from https://git-scm.com/install/
+open command prompt and run
+git clone https://github.com/hippo2311/Personal-AI-Chatbot.git
+.env files are sent through email. Please follow the instructions in the email on where to insert the .env files.
 
 ### 1. Client (React + Vite)
 ```bash

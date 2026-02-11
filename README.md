@@ -1,4 +1,4 @@
-## Client and Server API keys have been sent through email as requested by the NTU team.
+Client and Server API keys have been sent through email as requested by the NTU team.
 # DayPulse AI – Developer Guide
 
 DayPulse AI is an interactive wellbeing companion that blends AI-powered daily chats, a journaling workflow with photos, community sharing, and analytics. The codebase is split into two workspaces:

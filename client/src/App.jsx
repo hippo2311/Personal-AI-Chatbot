@@ -45,12 +45,14 @@ import {
   isCheckInWindowOpen,
   isValidDateKey,
   MOOD_META,
+  moodLabelToValue,
   randomId,
   REMINDER_POLL_MS,
   scoreMood,
   sortDiaryEntries,
   toIsoDate,
   updateConversationMood,
+  valueToMoodLabel,
 } from './lib/chatbotUtils.js';
 
 const QUICK_REPLIES = [
@@ -892,6 +894,36 @@ function MainApp({ authUser, onLogout }) {
   const reminderText = getReminderText(activeProfile, todayConversation);
 
   const dashboard = analyzeConversations(activeUser);
+  const currentMoodAverage = (() => {
+    const messages = Array.isArray(conversation?.messages) ? conversation.messages : [];
+    let total = 0;
+    let count = 0;
+    messages.forEach((message) => {
+      if (message.sender !== 'user') {
+        return;
+      }
+      if (message.moodLabel) {
+        total += moodLabelToValue(message.moodLabel);
+        count += 1;
+        return;
+      }
+      if (typeof message.moodScore === 'number') {
+        total += Math.max(-1, Math.min(1, Math.sign(message.moodScore)));
+        count += 1;
+      }
+    });
+    if (!count) {
+      return null;
+    }
+    return total / count;
+  })();
+
+  const currentMoodLabel =
+    (currentMoodAverage !== null && valueToMoodLabel(currentMoodAverage)) ||
+    (typeof conversation?.moodLabel === 'string' && conversation.moodLabel) ||
+    dashboard?.summary?.averageMoodLabel ||
+    'neutral';
+  const avatarModelUrl = String(activeProfile.avatarUrl || '');
   const diaryEntries = normalizeDiaryEntries(activeDates);
   const wallPosts = normalizeWallPosts(db.wallPosts);
   const todayIso = toIsoDate();
@@ -2144,6 +2176,8 @@ const endConversation = async () => {
         tab={tab}
         setTab={setTab}
         onLogout={onLogout}
+        currentMoodLabel={currentMoodLabel}
+        avatarModelUrl={avatarModelUrl}
       />
 
       <main className="main-panel">
@@ -2166,6 +2200,8 @@ const endConversation = async () => {
             formatDate={formatDate}
             formatTime={formatTime}
             moodMeta={MOOD_META}
+            currentMoodLabel={currentMoodLabel}
+            avatarModelUrl={avatarModelUrl}
           />
         )}
 

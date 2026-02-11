@@ -42,6 +42,34 @@ export const MOOD_META = {
   tough: { label: 'Tough', marker: 'TGH' },
 };
 
+const MOOD_VALUE_MAP = {
+  great: 1,
+  good: 1,
+  neutral: 0,
+  low: -1,
+  tough: -1,
+  bad: -1,
+};
+
+export function moodLabelToValue(label) {
+  const key = String(label || '').toLowerCase();
+  if (Object.prototype.hasOwnProperty.call(MOOD_VALUE_MAP, key)) {
+    return MOOD_VALUE_MAP[key];
+  }
+  return 0;
+}
+
+export function valueToMoodLabel(value) {
+  const normalized = Number(value);
+  if (!Number.isFinite(normalized) || Math.abs(normalized) < 0.2) {
+    return 'neutral';
+  }
+  if (normalized > 0) {
+    return 'good';
+  }
+  return 'tough';
+}
+
 export const DIARY_META = {
   good: { label: 'Good thing', marker: 'GOOD' },
   bad: { label: 'Bad thing', marker: 'BAD' },

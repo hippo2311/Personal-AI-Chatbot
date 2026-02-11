@@ -62,6 +62,7 @@ function ReadyPlayerMoodAvatar({ moodLabel = 'neutral', compact = false, avatarM
     }
     return MOOD_ANIMATION_URLS[tone] || MOOD_ANIMATION_URLS.neutral;
   }, [avatarModelUrl, tone]);
+  const playerKey = `${tone}-${animationUrl}`;
 
   useEffect(() => {
     if (window.customElements?.get('lottie-player')) {
@@ -126,6 +127,7 @@ function ReadyPlayerMoodAvatar({ moodLabel = 'neutral', compact = false, avatarM
       <div className={`rpm-avatar-canvas mood-tone-${tone}`} role="img" aria-label="Mood avatar animation">
         {isReady ? (
           <lottie-player
+            key={playerKey}
             ref={playerRef}
             src={animationUrl}
             background="transparent"

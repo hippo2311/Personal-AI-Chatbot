@@ -1,3 +1,5 @@
+import ReadyPlayerMoodAvatar from '../components/ReadyPlayerMoodAvatar.jsx';
+
 function ChatPage({
   activeUser,
   chatDate,
@@ -11,8 +13,19 @@ function ChatPage({
   formatDate,
   formatTime,
   moodMeta,
+  currentMoodLabel = 'neutral',
+  avatarModelUrl = '',
 }) {
   const profile = activeUser?.profile || {};
+  const moodLabel = currentMoodLabel || conversation?.moodLabel || 'neutral';
+  const moodDetails = moodMeta[moodLabel] || { marker: 'NEU', label: 'Neutral' };
+  const lastMessage = conversation.messages[conversation.messages.length - 1];
+  const lastUpdateTime = lastMessage ? formatTime(lastMessage.createdAt) : null;
+  const moodHelperText = conversation.messages.length === 0
+    ? `No messages yet. Start a check-in to animate today's avatar.`
+    : conversation.ended
+    ? `Ended at ${lastUpdateTime || '--:--'}. Come back tomorrow for a fresh prompt at ${profile.checkInTime || '20:00'}.`
+    : `Last update at ${lastUpdateTime || '--:--'}. Share one more detail to refine today's mood.`;
   return (
     <section className="panel">
       <div className="panel-header">
@@ -28,9 +41,19 @@ function ChatPage({
         />
       </div>
 
+      <div className="mood-face-row">
+        <ReadyPlayerMoodAvatar moodLabel={moodLabel} avatarModelUrl={avatarModelUrl} />
+        <div className="mood-face-copy">
+          <h3>
+            {moodDetails.marker} {moodDetails.label}
+          </h3>
+          <p>{moodHelperText}</p>
+        </div>
+      </div>
+
       <div className="chat-meta">
-        <span className={`mood-chip mood-${conversation.moodLabel}`}>
-          Mood: {moodMeta[conversation.moodLabel]?.marker} {moodMeta[conversation.moodLabel]?.label}
+        <span className={`mood-chip mood-${moodLabel}`}>
+          Mood: {moodDetails.marker} {moodDetails.label}
         </span>
         <span className="mood-chip">Date: {formatDate(chatDate)}</span>
         <span className="mood-chip">Status: {conversation.ended ? 'Closed' : 'Open'}</span>
